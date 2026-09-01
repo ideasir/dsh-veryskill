@@ -35,8 +35,27 @@ function api(path: string, body?: any): Promise<any> {
   }).then(r => r.json()).catch(() => null)
 }
 
-// ── 模块级工具：把文本注入输入框（DSH 双图层 textarea + backdrop，须同步 React tracker） ──
+// ── 模块级工具：把文本注入输入框（DSH 双图层 textarea + backdrop 或 contentEditable div，须同步 React tracker） ──
 function injectIntoInput(v: string): boolean {
+  // 方案 A：contentEditable div（DSH 0.1.2+ Lexical 编辑器）
+  const editable = document.querySelector<HTMLElement>('[data-composer-input][contenteditable="true"]')
+  if (editable) {
+    editable.focus()
+    // 清空现有内容
+    const sel = window.getSelection()
+    if (sel) {
+      const range = document.createRange()
+      range.selectNodeContents(editable)
+      sel.removeAllRanges()
+      sel.addRange(range)
+    }
+    // 用 execCommand 插入文本（Lexical 监听 input 事件捕获变更）
+    document.execCommand('insertText', false, v)
+    // 如果 execCommand 没触发 React 状态更新，手动触发 input
+    editable.dispatchEvent(new Event('input', { bubbles: true }))
+    return true
+  }
+  // 方案 B：textarea（旧版 DSH 兜底）
   const ta = document.querySelector<HTMLTextAreaElement>('textarea[data-phase]')
   if (!ta) return false
   try {
