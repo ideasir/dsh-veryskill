@@ -1476,10 +1476,9 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
             onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dsw-alias-label-secondary)'; e.currentTarget.style.borderColor = 'var(--dsw-alias-border-l2)' }}
           >ideasir</a>
           <button type="button" className="dsh-mm-btn-uninstall" onClick={(e) => { e.stopPropagation(); injectIntoInput('卸载当前插件') }} title="卸载插件（点击后会在输入框生成卸载提示词）"
-            style={{ cursor: uninstalling ? 'default' : 'pointer', opacity: uninstalling ? .6 : 1 }}
-            onMouseEnter={(e) => { if (uninstalling) return; e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)' }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)' }}
             onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--dsw-alias-bg-layer-1)' }}
-          >{uninstalling ? '卸载中…' : '卸载'}</button>
+          >卸载</button>
           <button type="button" className="dsh-mm-btn-update"
             onClick={(e) => {
               e.stopPropagation()
@@ -1516,10 +1515,10 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
               <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>加载中…</span>
             ) : (
               <button type="button" onClick={toggleEnabled}
-                style={{ width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer', position: 'relative', background: enabled ? 'var(--dsw-alias-state-success-primary, #22c55e)' : 'var(--dsw-alias-bg-layer-1)', transition: 'background .2s' }}
+                style={{ width: 44, height: 24, borderRadius: 999, border: 'none', cursor: 'pointer', position: 'relative', background: enabled ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-border-l3)', transition: 'background .18s cubic-bezier(0.4, 0, 0.2, 1)' }}
                 aria-label="启用超级技能"
               >
-                <span style={{ position: 'absolute', top: 3, width: 18, height: 18, borderRadius: '50%', background: '#fff', left: enabled ? 23 : 3, transition: 'left .2s' }} />
+                <span style={{ position: 'absolute', top: 3, width: 18, height: 18, borderRadius: 999, background: 'var(--dsw-alias-label-primary-inverted)', left: enabled ? 23 : 3, transition: 'left .2s cubic-bezier(0.34, 1.56, 0.64, 1)' }} />
               </button>
             )}
           </div>
@@ -1891,7 +1890,7 @@ export function apply(ctx: any) {
   ctx.slots.inject('settings.plugin.item', () => register({
     name: 'settings.plugin.item',
     key: 'veryskill',
-    priority: 30,
+    priority: 200,
   }, function SkillManagerPluginCard(props: any) {
     return React.createElement(SkillManagerCard, { ...props, onEnabledChange: applyEnabledState })
   }))
