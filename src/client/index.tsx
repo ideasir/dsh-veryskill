@@ -1084,7 +1084,7 @@ function SkillCard({ skill, onChanged, onEdit }: {
         }}
         title="点击查看技能详情"
       >
-        {/* 名称行 + 状态 badge */}
+        {/* 名称行：技能名 + 分类标签（右上角） */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{
             fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary)',
@@ -1092,6 +1092,20 @@ function SkillCard({ skill, onChanged, onEdit }: {
           }} title={skill.name}>
             {skill.name}
           </span>
+          {skill.category ? (
+            <span style={{
+              whiteSpace: 'nowrap', borderRadius: 999, padding: '2px 10px', fontSize: 13, fontWeight: 600,
+              background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 16%, transparent)',
+              color: 'var(--dsw-alias-brand-primary, #b6aaff)',
+              border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 40%, transparent)',
+              flex: 'none',
+            }}>
+              {skill.category}
+            </span>
+          ) : null}
+        </div>
+        {/* 标签行：技能类型 + 启用状态 + 快捷键 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <span style={{
             whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2)',
             borderRadius: 999, padding: '1px 8px', fontSize: 11, fontWeight: 500,
@@ -1099,26 +1113,6 @@ function SkillCard({ skill, onChanged, onEdit }: {
           }}>
             {skill.kind === 'directory' ? '目录技能' : '单个技能'}
           </span>
-          {skill.category ? (
-            <span style={{
-              whiteSpace: 'nowrap', borderRadius: 999, padding: '2px 10px', fontSize: 13, fontWeight: 600,
-              background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 16%, transparent)',
-              color: 'var(--dsw-alias-brand-primary, #b6aaff)',
-              border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 40%, transparent)',
-              marginLeft: 'auto', flex: 'none',
-            }}>
-              {skill.category}
-            </span>
-          ) : (
-            <span style={{ marginLeft: 'auto', flex: 'none' }} />
-          )}
-          {skill.shortcut ? (
-            <kbd style={{
-              whiteSpace: 'nowrap', borderRadius: 6, padding: '1px 6px', fontSize: 10,
-              border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-tertiary)',
-              fontFamily: 'var(--dsw-font-mono, Menlo, monospace)',
-            }}>{skill.shortcut}</kbd>
-          ) : null}
           <span style={{
             whiteSpace: 'nowrap', borderRadius: 999,
             padding: '1px 8px', fontSize: 11, fontWeight: 500,
@@ -1129,6 +1123,13 @@ function SkillCard({ skill, onChanged, onEdit }: {
           }}>
             {skill.enabled ? '已启用' : '已禁用'}
           </span>
+          {skill.shortcut ? (
+            <kbd style={{
+              whiteSpace: 'nowrap', borderRadius: 6, padding: '1px 6px', fontSize: 10,
+              border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-tertiary)',
+              fontFamily: 'var(--dsw-font-mono, Menlo, monospace)',
+            }}>{skill.shortcut}</kbd>
+          ) : null}
         </div>
         {/* 描述 */}
         {skill.description ? (
