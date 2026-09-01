@@ -1057,12 +1057,17 @@ function SkillCard({ skill, onChanged, onEdit }: {
     }
   }
 
+  // 边框颜色：启用=绿、禁用=红；hover 时加深
+  const borderColor = skill.enabled
+    ? (hovered ? 'var(--dsw-alias-state-success-primary, #22c55e)' : 'color-mix(in srgb, var(--dsw-alias-state-success-primary, #22c55e) 55%, transparent)')
+    : (hovered ? 'var(--dsw-alias-state-error-primary, #ef4444)' : 'color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 55%, transparent)')
+  const shadowColor = skill.enabled ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.25)'
   return (
     <li
       style={{
-        border: `1px solid ${hovered ? 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 60%, transparent)' : 'var(--dsw-alias-border-l2)'}`,
-        boxShadow: hovered ? '0 0 0 1px rgba(124,108,240,0.25), 0 4px 16px rgba(124,108,240,0.12)' : 'none',
-        background: hovered ? 'rgba(124,108,240,0.05)' : 'var(--dsw-alias-bg-layer-1)',
+        border: `1px solid ${borderColor}`,
+        boxShadow: hovered ? `0 0 0 1px ${shadowColor}, 0 4px 16px ${shadowColor}` : 'none',
+        background: hovered ? 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 5%, transparent)' : 'var(--dsw-alias-bg-layer-1)',
         borderRadius: 12, display: 'flex', flexDirection: 'column',
         listStyle: 'none', overflow: 'hidden', cursor: 'pointer',
         transition: 'border-color .15s ease, box-shadow .15s ease, background .15s ease',
@@ -1081,26 +1086,32 @@ function SkillCard({ skill, onChanged, onEdit }: {
       >
         {/* 名称行 + 状态 badge */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary)' }}>
+          <span style={{
+            fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary)',
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0,
+          }} title={skill.name}>
             {skill.name}
           </span>
           <span style={{
             whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2)',
             borderRadius: 999, padding: '1px 8px', fontSize: 11, fontWeight: 500,
-            color: 'var(--dsw-alias-label-secondary)',
+            color: 'var(--dsw-alias-label-secondary)', flex: 'none',
           }}>
             {skill.kind === 'directory' ? '目录技能' : '单个技能'}
           </span>
           {skill.category ? (
             <span style={{
-              whiteSpace: 'nowrap', borderRadius: 999, padding: '1px 8px', fontSize: 11, fontWeight: 500,
-              background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 14%, transparent)',
+              whiteSpace: 'nowrap', borderRadius: 999, padding: '2px 10px', fontSize: 13, fontWeight: 600,
+              background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 16%, transparent)',
               color: 'var(--dsw-alias-brand-primary, #b6aaff)',
-              border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 35%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 40%, transparent)',
+              marginLeft: 'auto', flex: 'none',
             }}>
               {skill.category}
             </span>
-          ) : null}
+          ) : (
+            <span style={{ marginLeft: 'auto', flex: 'none' }} />
+          )}
           {skill.shortcut ? (
             <kbd style={{
               whiteSpace: 'nowrap', borderRadius: 6, padding: '1px 6px', fontSize: 10,
@@ -1109,11 +1120,12 @@ function SkillCard({ skill, onChanged, onEdit }: {
             }}>{skill.shortcut}</kbd>
           ) : null}
           <span style={{
-            marginLeft: 'auto', whiteSpace: 'nowrap', borderRadius: 999,
+            whiteSpace: 'nowrap', borderRadius: 999,
             padding: '1px 8px', fontSize: 11, fontWeight: 500,
             background: skill.enabled ? 'var(--dsw-alias-bg-base)' : 'transparent',
             color: skill.enabled ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
             border: skill.enabled ? 'none' : '1px solid var(--dsw-alias-border-l2)',
+            flex: 'none',
           }}>
             {skill.enabled ? '已启用' : '已禁用'}
           </span>
