@@ -35,6 +35,7 @@ interface Skill {
   settingsEnabled: boolean  // 是否开启技能设置
   category?: string     // 技能分类（如：创作、工具、效率）
   shortcut?: string     // 快捷键（如 Ctrl+Shift+1）
+  alias?: string        // 别名（显示用，输入框优先显示别名）
   plugins: SkillPluginRef[]  // 关联的动态插件（归属/审计）
 }
 
@@ -48,6 +49,7 @@ interface SkillPluginRef {
 
 interface SkillSettings {
   enabled: boolean       // 是否开启技能设置
+  alias?: string         // 别名（显示用，输入框优先显示别名）
   category?: string      // 技能分类（如：创作、工具、效率）
   shortcut?: string      // 快捷键（如 Ctrl+Shift+1，用于快速把技能名装进输入框）
   plugins: SkillPluginRef[]  // 关联的动态插件归属（自动记录）
@@ -118,13 +120,14 @@ async function scanSkills(): Promise<{ skills: Skill[]; total: number; unmanaged
       const isUser = !!front.userCreated
       const settings = readSkillSettings(full)
       all.push({
-        name: kind === 'flat' ? name.replace(/\.md$/, '') : name,
+        name: kind === 'flat' ? name.replace(/\\.md$/, '') : name,
         description: front.description || '',
         kind,
         source: full,
         enabled,
         userCreated: isUser,
         settingsEnabled: settings?.enabled ?? false,
+        alias: settings?.alias,
         category: settings?.category,
         shortcut: settings?.shortcut,
         plugins: settings?.plugins ?? [],
@@ -148,6 +151,7 @@ function readSkillSettings(skillPath: string): SkillSettings | null {
     const raw = JSON.parse(readFileSync(p, 'utf-8'))
     return {
       enabled: !!raw.enabled,
+      alias: raw.alias ? String(raw.alias) : undefined,
       category: raw.category ? String(raw.category) : undefined,
       shortcut: raw.shortcut ? String(raw.shortcut) : undefined,
       plugins: Array.isArray(raw.plugins) ? raw.plugins.map((p: any) => ({
@@ -564,6 +568,7 @@ export function apply(ctx: any, config: any = {}) {
           if (!found) return json(res, { ok: false, error: '技能不存在' })
           const settings: SkillSettings = {
             enabled: !!body.enabled,
+            alias: body.alias ? String(body.alias).trim() : undefined,
             category: body.category ? String(body.category).trim() : undefined,
             shortcut: body.shortcut ? String(body.shortcut).trim() : undefined,
             // 保留已有插件归属，避免 setup-save 覆盖丢失

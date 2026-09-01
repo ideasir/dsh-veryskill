@@ -18,6 +18,7 @@ interface Skill {
   source: string
   enabled: boolean
   settingsEnabled?: boolean
+  alias?: string         // 别名（显示用，输入框优先显示别名）
   category?: string
   shortcut?: string
   plugins?: Array<{ id: string; name?: string; packageId?: string; attachedAt?: string; lastSeenAt?: string }>
@@ -328,13 +329,16 @@ function SkillDetailModal({ name, skill, onClose, onChanged, onEdit }: {
   const valueText: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }
 
   return (
-    <Modal title={`技能详情 — ${skill.name}`} onClose={onClose} width={680}>
+    <Modal title={`技能详情 — ${skill.alias || skill.name}`} onClose={onClose} width={680}>
       {err ? <p style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: 13 }}>{err}</p> : (
         <>
           {/* 概要信息 */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }}>{skill.name}</span>
+              <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }}>{skill.alias || skill.name}</span>
+              {skill.alias ? (
+                <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', fontFamily: 'var(--dsw-font-mono, Menlo, monospace)' }}>{skill.name}</span>
+              ) : null}
               <span style={{ whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 999, padding: '1px 10px', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' }}>
                 {skill.kind === 'directory' ? '目录技能' : '单个技能'}
               </span>
@@ -437,7 +441,7 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
   }
 
   const save = () => {
-    api('/setup-save', { name, enabled: settings.enabled, category: settings.category, fields: settings.fields.map((f: any) => ({ key: f.key, label: f.label, value: f.value, isSecret: f.isSecret, reason: f.reason })) }).then((d) => {
+    api('/setup-save', { name, enabled: settings.enabled, alias: settings.alias, category: settings.category, fields: settings.fields.map((f: any) => ({ key: f.key, label: f.label, value: f.value, isSecret: f.isSecret, reason: f.reason })) }).then((d) => {
       if (d?.ok) { onSaved(); onClose() }
       else setErr(d?.error ?? '保存失败')
     })
@@ -485,6 +489,22 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
               ? '已开启技能设置，以下参数在技能执行时会以你填写的值生效。'
               : '技能设置未开启 —— 在「设置引导」中开启后，这里才能配置可复用参数。'}
           </p>
+
+          {/* 别名 */}
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>别名（显示用，可中文；留空则显示技能名）</label>
+            <input
+              value={settings.alias ?? ''}
+              onChange={(e) => setSettings((prev: any) => ({ ...prev, alias: e.target.value }))}
+              placeholder="如：出图、出视频（输入框和卡片优先显示别名）"
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+                borderRadius: 10, padding: '8px 12px', fontSize: 13,
+                color: 'var(--dsw-alias-label-primary)', outline: 'none',
+              }}
+            />
+          </div>
 
           {/* 分类 */}
           <div style={{ marginBottom: 12 }}>
@@ -1103,14 +1123,24 @@ function SkillCard({ skill, onChanged, onEdit }: {
         }}
         title="点击查看技能详情"
       >
-        {/* 名称行：技能名 + 分类标签（右上角） */}
+        {/* 名称行：别名（大）+ 技能名（小）+ 分类标签（右上角） */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{
-            fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary)',
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0,
-          }} title={skill.name}>
-            {skill.name}
-          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 }}>
+            <span style={{
+              fontSize: 17, fontWeight: 700, lineHeight: 1.35, color: 'var(--dsw-alias-label-primary)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }} title={skill.alias || skill.name}>
+              {skill.alias || skill.name}
+            </span>
+            {skill.alias ? (
+              <span style={{
+                fontSize: 12, lineHeight: 1.3, color: 'var(--dsw-alias-label-tertiary)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }} title={skill.name}>
+                {skill.name}
+              </span>
+            ) : null}
+          </div>
           {skill.category ? (
             <span style={{
               whiteSpace: 'nowrap', borderRadius: 999, padding: '2px 10px', fontSize: 13, fontWeight: 600,
@@ -1641,7 +1671,7 @@ function SkillQuickLauncher(_props: any) {
       const target = skills.find(s => s.shortcut && normalizeShortcut(s.shortcut) === combo && s.enabled)
       if (!target) return
       e.preventDefault(); e.stopPropagation()
-      injectIntoInput(target.name + ' ')
+      injectIntoInput((target.alias || target.name) + ' ')
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
@@ -1660,7 +1690,7 @@ function SkillQuickLauncher(_props: any) {
   }, [skills])
 
   const pickSkill = (s: Skill) => {
-    injectIntoInput(s.name + ' ')
+    injectIntoInput((s.alias || s.name) + ' ')
     setOpen(false); setActiveCat(''); setSubPos(null)
   }
 
@@ -1731,7 +1761,7 @@ function SkillQuickLauncher(_props: any) {
         <button key={s.name} type="button" onClick={() => pickSkill(s)} style={rowStyle}
           onMouseEnter={(e) => { e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 12%, transparent)'; e.currentTarget.style.color = 'var(--dsw-alias-brand-primary, #b6aaff)' }}
           onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--dsw-alias-label-primary)' }}>
-          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</span>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.alias || s.name}</span>
           {s.shortcut ? (
             <kbd style={{
               fontSize: 10, padding: '1px 5px', borderRadius: 4,
