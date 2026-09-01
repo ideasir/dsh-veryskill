@@ -805,12 +805,14 @@ export function apply(ctx: any, config: any = {}) {
       handler: async (_req: IncomingMessage, res: ServerResponse) => {
         try {
           const { skills } = await scanSkills()
-          const bundles = getBundles()
+          const categories = new Set<string>()
+          for (const s of skills) {
+            const cat = (s.category || '').trim()
+            if (cat) categories.add(cat)
+          }
           const items = [
-            { id: 'dir', label: '插件目录', ok: existsSync(NM_DIR), errorReason: existsSync(NM_DIR) ? '' : '未找到 profile 插件目录' },
-            { id: 'scan', label: '技能发现', ok: skills.length > 0, errorReason: skills.length > 0 ? '' : '未发现已安装技能' },
-            { id: 'bundles', label: '加载清单', ok: bundles.length > 0, errorReason: bundles.length > 0 ? '' : 'bundles 配置为空' },
-            { id: 'toggle', label: '超级技能开关', ok: getEnabled(), errorReason: getEnabled() ? '' : '超级技能当前为关闭状态' },
+            { id: 'skills', label: `管理的技能数：${skills.length}`, ok: true, errorReason: '' },
+            { id: 'categories', label: `分类数：${categories.size}`, ok: true, errorReason: '' },
           ]
           json(res, { ok: true, items, version: getLocalVersion() })
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }

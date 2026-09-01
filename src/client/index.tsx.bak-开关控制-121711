@@ -1494,11 +1494,10 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
           <button type="button" className="dsh-mm-btn-update"
             onClick={(e) => {
               e.stopPropagation()
-              if (hasUpdate) {
-                injectIntoInput('更新当前插件为最新版本')
-              } else api('/update').then((d) => { if (d?.ok) setHasUpdate(!!d.hasUpdate) })
+              if (hasUpdate) window.open(GITHUB_REPO, '_blank', 'noreferrer')
+              else api('/update').then((d) => { if (d?.ok) setHasUpdate(!!d.hasUpdate) })
             }}
-            title={hasUpdate ? '发现新版本，点击后会在输入框生成更新提示词' : '当前已是最新版本（点击重新检查）'}
+            title={hasUpdate ? '发现新版本，点击前往仓库查看更新' : '当前已是最新版本（点击重新检查）'}
             style={{ color: hasUpdate ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)', border: `1px solid ${hasUpdate ? 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 45%, transparent)' : 'var(--dsw-alias-border-l2)'}` }}
             onMouseEnter={(e) => { e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent)' }}
             onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--dsw-alias-bg-layer-1)' }}
@@ -1536,11 +1535,11 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
           </div>
           {envOpen ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 0' }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', letterSpacing: '.06em', textTransform: 'uppercase' }}>技能统计</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', letterSpacing: '.06em', textTransform: 'uppercase' }}>功能检测</span>
               {envItems.map(item => (
                 <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: 'var(--dsw-alias-brand-primary, #7c6cf0)' }} />
-                  <span style={{ fontSize: 13, whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-primary)' }}>{item.label}</span>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: item.ok ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)' }} />
+                  <span style={{ fontSize: 13, whiteSpace: 'nowrap', color: item.ok ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-error-primary)' }}>{item.label}</span>
                   {!item.ok && item.errorReason ? (
                     <span style={{ fontSize: 12, color: 'var(--dsw-alias-state-error-primary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.errorReason}</span>
                   ) : null}
@@ -1556,8 +1555,6 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
 
 // ── 注册 ──────────────────────────────────────────────
 let sectionDisposer: (() => void) | null = null
-let launcherDisposer: (() => void) | null = null
-let interceptDisposer: (() => void) | null = null
 
 // 全局：让 TS 认识 window 上的自定义字段
 declare global {
@@ -1858,11 +1855,13 @@ export function apply(ctx: any) {
     }
   }
 
-  // ── 统一启停：开关控制 技能菜单 + 输入框图标 + Enter 创建拦截 ──
-  // 关闭时这三个 UI 元素全部消失，开启时全部出现（不只管服务端工具）
-  const applyEnabledState = (enabled: boolean) => {
-    // 1) 技能管理菜单（settings.section）
-    if (enabled && !sectionDisposer) {
+  // 启动全局拦截（延迟到 DOM 就绪）
+  setTimeout(() => {
+    try { setupGlobalIntercept() } catch { /* ignore */ }
+  }, 1500)
+
+  const ensureSection = (visible: boolean) => {
+    if (visible && !sectionDisposer) {
       sectionDisposer = ctx.slots.inject('settings.section', () => register({
         name: 'settings.section',
         id: 'veryskill-section',
@@ -1871,41 +1870,29 @@ export function apply(ctx: any) {
       }, function SkillManagerSectionEntry() {
         return React.createElement(SkillManagerSection, { ctx })
       }))
-    } else if (!enabled && sectionDisposer) {
+    } else if (!visible && sectionDisposer) {
       try { sectionDisposer() } catch { /* ignore */ }
       sectionDisposer = null
     }
-    // 2) 输入框左侧图标（SkillQuickLauncher：分类菜单 + 快捷键）
-    if (enabled && !launcherDisposer) {
-      launcherDisposer = ctx.slots.inject('conversation.input.left' as any, () => register({
-        name: 'conversation.input.left',
-        id: 'dsh-veryskill-launcher',
-        order: 80,
-        label: () => '超级技能',
-      } as any, (props: any) => React.createElement(SkillQuickLauncher, { ...props })))
-    } else if (!enabled && launcherDisposer) {
-      try { launcherDisposer() } catch { /* ignore */ }
-      launcherDisposer = null
-    }
-    // 3) 全局 Enter 拦截（「新建一个技能：」→ 插件创建）
-    if (enabled && !interceptDisposer) {
-      try { interceptDisposer = setupGlobalIntercept() } catch { interceptDisposer = null }
-    } else if (!enabled && interceptDisposer) {
-      try { interceptDisposer() } catch { /* ignore */ }
-      interceptDisposer = null
-    }
   }
 
-  // 启动时按当前开关状态决定三个 UI 元素
-  api('/list').then((d) => { applyEnabledState(!!(d && d.ok && d.enabled)) })
+  api('/list').then((d) => { ensureSection(!!(d && d.ok && d.enabled)) })
 
   ctx.slots.inject('settings.plugin.item', () => register({
     name: 'settings.plugin.item',
     key: 'veryskill',
     priority: 30,
   }, function SkillManagerPluginCard(props: any) {
-    return React.createElement(SkillManagerCard, { ...props, onEnabledChange: applyEnabledState })
+    return React.createElement(SkillManagerCard, { ...props, onEnabledChange: ensureSection })
   }))
+
+  // 输入框工具行图标：超级技能分类菜单 + 快捷键
+  ctx.slots.inject('conversation.input.left' as any, () => register({
+    name: 'conversation.input.left',
+    id: 'dsh-veryskill-launcher',
+    order: 80,
+    label: () => '超级技能',
+  } as any, (props: any) => React.createElement(SkillQuickLauncher, { ...props })))
 }
 
 export const inject = ['slots']
