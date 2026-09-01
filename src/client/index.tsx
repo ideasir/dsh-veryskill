@@ -1407,7 +1407,6 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
   const [loading, setLoading] = React.useState(true)
   const [version, setVersion] = React.useState('')
   const [hasUpdate, setHasUpdate] = React.useState(false)
-  const [uninstalling, setUninstalling] = React.useState(false)
   const [feedback, setFeedback] = React.useState<string | null>(null)
   const [envItems, setEnvItems] = React.useState<EnvCheckItem[]>([])
   const [envChecking, setEnvChecking] = React.useState(false)
@@ -1429,16 +1428,6 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
     api('/save', { enabled: next }).then((d) => {
       if (d && !d.ok) setEnabled(!next)
       else onEnabledChange?.(next)
-    })
-  }
-
-  const handleUninstall = () => {
-    if (uninstalling) return
-    if (!window.confirm('确定卸载 VerySkill 插件吗？\n\n将从 DSH 中移除插件本体和全部配置。')) return
-    setUninstalling(true); setFeedback(null)
-    api('/uninstall').then((r) => {
-      if (r?.ok) setFeedback('已卸载。请重启 DSH 使生效（插件配置文件中已移除）。')
-      else { setFeedback(`卸载失败：${r?.error ?? '未知错误'}`); setUninstalling(false) }
     })
   }
 
@@ -1486,7 +1475,7 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
             onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--dsw-alias-brand-primary)'; e.currentTarget.style.borderColor = 'var(--dsw-alias-brand-primary)' }}
             onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dsw-alias-label-secondary)'; e.currentTarget.style.borderColor = 'var(--dsw-alias-border-l2)' }}
           >ideasir</a>
-          <button type="button" className="dsh-mm-btn-uninstall" onClick={(e) => { e.stopPropagation(); handleUninstall() }} disabled={uninstalling} title="卸载插件"
+          <button type="button" className="dsh-mm-btn-uninstall" onClick={(e) => { e.stopPropagation(); injectIntoInput('卸载当前插件') }} title="卸载插件（点击后会在输入框生成卸载提示词）"
             style={{ cursor: uninstalling ? 'default' : 'pointer', opacity: uninstalling ? .6 : 1 }}
             onMouseEnter={(e) => { if (uninstalling) return; e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)' }}
             onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--dsw-alias-bg-layer-1)' }}
