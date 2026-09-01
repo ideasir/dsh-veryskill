@@ -1,5 +1,5 @@
 /**
- * dsh-skillskill client bundle (tsdown). Same pattern as dsh-makemake.
+ * dsh-veryskill client bundle (tsdown). Same pattern as dsh-makemake.
  */
 
 const CLIENT_EXTERNALS = [
@@ -15,7 +15,7 @@ const CLIENT_EXTERNALS = [
 ] as const
 
 export default {
-  name: 'dsh-skillskill/client',
+  name: 'dsh-veryskill/client',
   entry: { client: 'src/client/index.tsx' },
   outDir: 'lib',
   format: 'cjs',
@@ -32,7 +32,7 @@ export default {
   noExternal: (id: string) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
   outputOptions: {
     entryFileNames: 'client.js',
-    banner: 'window.__ModuleLoader__.load({ id: "dsh-skillskill", factory: (require) => {',
+    banner: 'window.__ModuleLoader__.load({ id: "dsh-veryskill", factory: (require) => {',
     footer: 'return module.exports; } });',
     intro: 'var module = { exports: {} }; var exports = module.exports;',
   },

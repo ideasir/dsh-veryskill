@@ -1,8 +1,8 @@
 /**
- * dsh-skillskill — 技能管理插件（客户端）
+ * dsh-veryskill — 超级技能插件（客户端）
  *
- * 1. settings.plugin.item —— SkillSkill 卡片（图标/版本/4标签 + 启动开关；无技能列表）
- * 2. settings.section —— 「技能管理」菜单（Agent 预设下方，动态注册/移除）
+ * 1. settings.plugin.item —— VerySkill 卡片（图标/版本/4标签 + 启动开关；无技能列表）
+ * 2. settings.section —— 「超级技能」菜单（Agent 预设下方，动态注册/移除）
  *    内容：技能卡片对齐 Agent 预设样式（名称+描述+底部按钮行）
  *    按钮：启用/禁用 · 编辑（弹窗）· 设置（占位）· 删除（输入 yes 确认）
  */
@@ -17,18 +17,66 @@ interface Skill {
   kind: 'directory' | 'flat'
   source: string
   enabled: boolean
+  settingsEnabled?: boolean
+  category?: string
+  shortcut?: string
+  plugins?: Array<{ id: string; name?: string; packageId?: string; attachedAt?: string; lastSeenAt?: string }>
 }
 
 interface EnvCheckItem { id: string; label: string; ok: boolean; errorReason: string }
 
-const GITHUB_REPO = 'https://github.com/ideasir/dsh-skillskill'
+const GITHUB_REPO = 'https://github.com/ideasir/dsh-veryskill'
 
 function api(path: string, body?: any): Promise<any> {
-  return fetch('/plugins/dsh-skillskill' + path, {
+  return fetch('/plugins/dsh-veryskill' + path, {
     method: body ? 'POST' : 'GET',
     headers: body ? { 'content-type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   }).then(r => r.json()).catch(() => null)
+}
+
+// ── 模块级工具：把文本注入输入框（DSH 双图层 textarea + backdrop，须同步 React tracker） ──
+function injectIntoInput(v: string): boolean {
+  const ta = document.querySelector<HTMLTextAreaElement>('textarea[data-phase]')
+  if (!ta) return false
+  try {
+    const tracker = (ta as any)._valueTracker
+    if (tracker) tracker.setValue('')
+    const protoSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
+    if (protoSetter) {
+      protoSetter.call(ta, v)
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    } else {
+      ta.value = v
+    }
+    const syncBackdrop = () => {
+      const cont = ta.parentElement
+      const backdrop = cont ? [...cont.querySelectorAll('*')].find((el: any) => el.className && String(el.className).includes('backdrop')) : null
+      if (backdrop && backdrop.textContent !== v) {
+        if (tracker) tracker.setValue('')
+        if (protoSetter) {
+          protoSetter.call(ta, v)
+          ta.dispatchEvent(new Event('input', { bubbles: true }))
+        }
+      }
+    }
+    setTimeout(syncBackdrop, 100)
+    setTimeout(syncBackdrop, 500)
+  } catch {
+    ta.value = v
+  }
+  ta.focus()
+  try { ta.setSelectionRange(v.length, v.length) } catch { /* ignore */ }
+  return true
+}
+
+// 当前技能列表缓存（供 launcher 菜单与快捷键使用，避免频繁请求）
+let skillsCache: Skill[] = []
+function loadSkills(): Promise<Skill[]> {
+  return api('/list').then((d) => {
+    if (d?.ok) { skillsCache = d.skills || []; return skillsCache }
+    return skillsCache
+  })
 }
 
 function SkillIcon({ size = 20 }: { size?: number }) {
@@ -41,6 +89,12 @@ function SkillIcon({ size = 20 }: { size?: number }) {
 
 // ── 小图标（Lucide 24x24 2px） ────────────────────────
 const Ic = {
+  plug: (p: any) => (
+    <svg width={p?.size ?? 14} height={p?.size ?? 14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22v-5" /><path d="M9 8V2" /><path d="M15 8V2" /><path d="M18 8v5a6 6 0 0 1-6 6" /><path d="M6 8v5c0 1.1.3 2.1.9 3" />
+      <path d="M5 11h14" />
+    </svg>
+  ),
   power: (p: any) => (
     <svg width={p?.size ?? 14} height={p?.size ?? 14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 2v10" /><path d="M18.4 6.6a9 9 0 1 1-12.77.04" />
@@ -70,13 +124,40 @@ const Ic = {
   ),
 }
 
-// ── 弹窗容器（body portal + ESC 关闭） ────────────────
+// ── 弹窗栈：多个弹窗叠加时，ESC 只关闭最上层激活的那个 ──
+// 每个 Modal 挂载时把自己的 close 引用入栈（用 ref 保证稳定），卸载时出栈；
+// 全局只注册一次 keydown 监听，ESC 时取栈顶执行 —— 叠加弹窗不再一次全关。
+const modalCloseStack: Array<React.MutableRefObject<(() => void) | null>> = []
+let escListenerInstalled = false
+function installEscListener() {
+  if (escListenerInstalled) return
+  escListenerInstalled = true
+  // 捕获阶段监听（window 最先执行），有弹窗时拦截 ESC：
+  // 防止事件冒泡到 document 上 DSH 设置面板的 ESC 监听（它会把设置面板整个关掉，
+  // 导致超级技能 section 卸载、所有弹窗一起消失）。
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return
+    const top = modalCloseStack[modalCloseStack.length - 1]
+    if (!top?.current) return
+    e.stopPropagation()  // 只关最上层弹窗，不连设置面板一起关
+    e.preventDefault()
+    top.current()
+  }, true)
+}
+
+// ── 弹窗容器（body portal + ESC 关闭栈顶） ────────────────
 function Modal({ title, onClose, children, width = 560 }: { title: string; onClose: () => void; children: React.ReactNode; width?: number }) {
+  // 用 ref 包住 onClose：避免内联函数每次渲染变化导致 effect 反复入栈出栈
+  const closeRef = React.useRef<(() => void) | null>(onClose)
+  closeRef.current = onClose
   React.useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
-  }, [onClose])
+    modalCloseStack.push(closeRef)
+    installEscListener()
+    return () => {
+      const i = modalCloseStack.indexOf(closeRef)
+      if (i >= 0) modalCloseStack.splice(i, 1)
+    }
+  }, [])
   return (
     <div
       onClick={onClose}
@@ -89,19 +170,19 @@ function Modal({ title, onClose, children, width = 560 }: { title: string; onClo
         onClick={(e) => e.stopPropagation()}
         style={{
           width: `min(${width}px, 92vw)`, maxHeight: '80vh', overflow: 'auto',
-          background: 'rgb(43, 44, 46)', border: '1px solid rgba(255,255,255,0.12)',
+          background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l2)',
           borderRadius: 14, boxShadow: '0 18px 50px rgba(0,0,0,0.5)',
         }}
       >
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)',
-          position: 'sticky', top: 0, background: 'rgb(43, 44, 46)',
+          padding: '14px 16px', borderBottom: '1px solid var(--dsw-alias-border-l1)',
+          position: 'sticky', top: 0, background: 'var(--dsw-alias-bg-layer-2)',
         }}>
-          <span style={{ fontSize: 15, fontWeight: 600, color: 'rgb(249, 250, 251)' }}>{title}</span>
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }}>{title}</span>
           <button
             type="button" onClick={onClose}
-            style={{ border: 'none', background: 'transparent', color: 'rgb(173,178,184)', cursor: 'pointer', display: 'inline-flex', padding: 4 }}
+            style={{ border: 'none', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', display: 'inline-flex', padding: 4 }}
           ><Ic.x /></button>
         </div>
         <div style={{ padding: '14px 16px' }}>{children}</div>
@@ -116,10 +197,10 @@ function DeleteConfirm({ name, onCancel, onConfirm }: { name: string; onCancel: 
   const ok = text.trim().toLowerCase() === 'yes'
   return (
     <Modal title={`删除技能 ${name}`} onClose={onCancel} width={460}>
-      <p style={{ margin: '0 0 10px', fontSize: 13, color: 'rgb(220, 225, 230)', lineHeight: 1.6 }}>
+      <p style={{ margin: '0 0 10px', fontSize: 13, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }}>
         将<strong>完整删除</strong>该技能：移除加载配置与文件（symlink 仅删链接，保留源目录）。此操作不可恢复。
       </p>
-      <p style={{ margin: '0 0 12px', fontSize: 13, color: 'rgb(173,178,184)' }}>
+      <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
         如确认删除，请在下方输入 <code style={{ color: 'var(--dsw-alias-state-error-primary)', fontFamily: 'var(--dsw-font-mono, Menlo, monospace)' }}>yes</code>
       </p>
       <input
@@ -129,22 +210,70 @@ function DeleteConfirm({ name, onCancel, onConfirm }: { name: string; onCancel: 
         autoFocus
         style={{
           width: '100%', boxSizing: 'border-box',
-          background: 'rgb(53,54,56)', border: '1px solid rgba(255,255,255,0.15)',
+          background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
           borderRadius: 10, padding: '9px 12px', fontSize: 13,
-          color: 'rgb(249,250,251)', outline: 'none', marginBottom: 14,
+          color: 'var(--dsw-alias-label-primary)', outline: 'none', marginBottom: 14,
         }}
       />
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
         <button type="button" onClick={onCancel} style={{
           padding: '7px 14px', borderRadius: 8, fontSize: 13,
-          border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-          color: 'rgb(249,250,251)', cursor: 'pointer',
+          border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+          color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
         }}>取消</button>
         <button type="button" disabled={!ok} onClick={onConfirm} style={{
           padding: '7px 14px', borderRadius: 8, fontSize: 13, border: 'none',
           background: ok ? 'var(--dsw-alias-state-error-primary, #ef4444)' : 'rgba(239,68,68,0.35)',
-          color: '#fff', cursor: ok ? 'pointer' : 'default',
+          color: 'var(--dsw-alias-label-primary-inverted, #fff)', cursor: ok ? 'pointer' : 'default',
         }}>确认删除</button>
+      </div>
+    </Modal>
+  )
+}
+
+// ── 禁用/启用确认弹窗（展示逻辑说明，确认后再执行） ──
+function ToggleConfirm({ name, enabled, onCancel, onConfirm }: { name: string; enabled: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const [confirming, setConfirming] = React.useState(false)
+  return (
+    <Modal title={enabled ? `禁用技能 ${name}` : `启用技能 ${name}`} onClose={onCancel} width={520}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {enabled ? (
+          <>
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.7 }}>
+              禁用后，DSH 将<strong>不再加载这个技能</strong>：
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.8 }}>
+              <li>模型<strong>看不到</strong>也调不到它——它从「可用技能」目录里消失</li>
+              <li>技能的文件和设置都保留在磁盘上，<strong>不会删除</strong>，随时可重新启用</li>
+              <li>新会话立即生效；当前会话的目录里它仍显示，新建会话后才消失</li>
+            </ul>
+          </>
+        ) : (
+          <>
+            <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.7 }}>
+              启用后，DSH 将<strong>重新加载这个技能</strong>：
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.8 }}>
+              <li>模型<strong>能看到</strong>并正常调用它——它回到「可用技能」目录</li>
+              <li>新会话立即生效，无需重启</li>
+            </ul>
+          </>
+        )}
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.5 }}>
+          💡 如果这个技能有配套插件，请确保它是「永久插件」（安装在 profile 里），不要用动态插件——禁用技能不会影响已安装的插件。
+        </p>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+        <button type="button" onClick={onCancel} style={{
+          padding: '7px 14px', borderRadius: 8, fontSize: 13,
+          border: '1px solid var(--dsw-alias-border-l2)', background: 'var(--dsw-alias-bg-layer-1)',
+          color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
+        }}>取消</button>
+        <button type="button" disabled={confirming} onClick={() => { setConfirming(true); onConfirm() }} style={{
+          padding: '7px 14px', borderRadius: 8, fontSize: 13, border: 'none',
+          background: enabled ? 'var(--dsw-alias-state-error-primary, #ef4444)' : 'var(--dsw-alias-state-success-primary, #22c55e)',
+          color: 'var(--dsw-alias-label-primary-inverted, #fff)', cursor: confirming ? 'default' : 'pointer', opacity: confirming ? .6 : 1,
+        }}>{confirming ? '处理中…' : (enabled ? '确认禁用' : '确认启用')}</button>
       </div>
     </Modal>
   )
@@ -177,7 +306,7 @@ function SkillDetailModal({ name, skill, onClose, onChanged, onEdit }: {
   }, [name])
 
   const rowLabel: React.CSSProperties = { fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-tertiary)', letterSpacing: '.05em', textTransform: 'uppercase', margin: '14px 0 8px' }
-  const valueText: React.CSSProperties = { fontSize: 13, color: 'rgb(210, 215, 220)', lineHeight: 1.6 }
+  const valueText: React.CSSProperties = { fontSize: 13, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }
 
   return (
     <Modal title={`技能详情 — ${skill.name}`} onClose={onClose} width={680}>
@@ -186,15 +315,15 @@ function SkillDetailModal({ name, skill, onClose, onChanged, onEdit }: {
           {/* 概要信息 */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 18, fontWeight: 600, color: 'rgb(249,250,251)' }}>{skill.name}</span>
-              <span style={{ whiteSpace: 'nowrap', border: '1px solid rgba(255,255,255,0.14)', borderRadius: 999, padding: '1px 10px', fontSize: 12, fontWeight: 500, color: 'rgb(173,178,184)' }}>
+              <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }}>{skill.name}</span>
+              <span style={{ whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 999, padding: '1px 10px', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)' }}>
                 {skill.kind === 'directory' ? '目录技能' : '单个技能'}
               </span>
               <span style={{
                 whiteSpace: 'nowrap', borderRadius: 999, padding: '1px 10px', fontSize: 12, fontWeight: 500,
-                background: skill.enabled ? 'rgb(249,250,251)' : 'transparent',
-                color: skill.enabled ? 'rgb(53,54,56)' : 'rgb(173,178,184)',
-                border: skill.enabled ? 'none' : '1px solid rgba(255,255,255,0.14)',
+                background: skill.enabled ? 'var(--dsw-alias-bg-base)' : 'transparent',
+                color: skill.enabled ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+                border: skill.enabled ? 'none' : '1px solid var(--dsw-alias-border-l2)',
               }}>
                 {skill.enabled ? '已启用' : '已禁用'}
               </span>
@@ -205,11 +334,11 @@ function SkillDetailModal({ name, skill, onClose, onChanged, onEdit }: {
               ) : null}
             </div>
 
-            <div style={{ fontSize: 13, color: 'rgb(173,178,184)', lineHeight: 1.6 }}>
+            <div style={{ fontSize: 13, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.6 }}>
               {skill.description || '（无描述）'}
             </div>
 
-            <div style={{ fontFamily: 'var(--dsw-font-mono, Menlo, monospace)', fontSize: 12, color: 'rgb(130,136,142)' }}>
+            <div style={{ fontFamily: 'var(--dsw-font-mono, Menlo, monospace)', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
               {skill.source}
             </div>
           </div>
@@ -220,11 +349,11 @@ function SkillDetailModal({ name, skill, onClose, onChanged, onEdit }: {
               <div style={rowLabel}>设置项</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {settings.fields.map((f: any) => (
-                  <div key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: 'rgb(53,54,56)', border: '1px solid rgba(255,255,255,0.08)' }}>
-                    <span style={{ fontSize: 13, fontWeight: 500, color: 'rgb(249,250,251)', minWidth: 110 }}>
+                  <div key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l1)' }}>
+                    <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)', minWidth: 110 }}>
                       {f.label} {f.isSecret ? <span dangerouslySetInnerHTML={{ __html: LOCK_SVG }} /> : ''}
                     </span>
-                    <span style={{ fontSize: 13, color: f.isSecret ? 'rgb(173,178,184)' : 'rgb(210,215,220)', fontFamily: 'var(--dsw-font-mono, Menlo, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span style={{ fontSize: 13, color: f.isSecret ? 'var(--dsw-alias-label-secondary)' : 'var(--dsw-alias-label-primary)', fontFamily: 'var(--dsw-font-mono, Menlo, monospace)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {f.isSecret && f.value ? '••••••••' : (f.value || '（未填写）')}
                     </span>
                     {f.reason ? <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)', marginLeft: 'auto' }}>{f.reason}</span> : null}
@@ -237,10 +366,10 @@ function SkillDetailModal({ name, skill, onClose, onChanged, onEdit }: {
           {/* SKILL.md 内容 */}
           <div style={rowLabel}>技能内容</div>
           <pre style={{
-            background: 'rgb(30,31,33)', border: '1px solid rgba(255,255,255,0.1)',
+            background: 'var(--dsw-alias-bg-layer-3)', border: '1px solid var(--dsw-alias-border-l1)',
             borderRadius: 10, padding: 12, fontSize: 12, lineHeight: 1.55,
             fontFamily: 'var(--dsw-font-mono, ui-monospace, Menlo, monospace)',
-            color: 'rgb(210, 215, 220)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            color: 'var(--dsw-alias-label-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
             maxHeight: '36vh', overflow: 'auto', margin: 0,
           }}>
             {detail?.content || '（技能内容为空）'}
@@ -250,13 +379,13 @@ function SkillDetailModal({ name, skill, onClose, onChanged, onEdit }: {
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
             <button type="button" onClick={() => onEdit(skill.name)} style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 13,
-              border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-              color: 'rgb(173,178,184)', cursor: 'pointer',
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
             }}><Ic.edit size={12} style={{ verticalAlign: '-2px', marginRight: 4 }} />编辑内容</button>
             <button type="button" onClick={onClose} style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 13,
-              border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-              color: 'rgb(249,250,251)', cursor: 'pointer',
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
             }}>关闭</button>
           </div>
         </>
@@ -270,6 +399,7 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
   const [settings, setSettings] = React.useState<any>({ enabled: false, fields: [] })
   const [loading, setLoading] = React.useState(true)
   const [err, setErr] = React.useState('')
+  const [capturing, setCapturing] = React.useState(false)
 
   React.useEffect(() => {
     api(`/settings-get?name=${encodeURIComponent(name)}`).then((d) => {
@@ -288,22 +418,101 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
   }
 
   const save = () => {
-    api('/setup-save', { name, enabled: settings.enabled, fields: settings.fields.map((f: any) => ({ key: f.key, label: f.label, value: f.value, isSecret: f.isSecret, reason: f.reason })) }).then((d) => {
+    api('/setup-save', { name, enabled: settings.enabled, category: settings.category, fields: settings.fields.map((f: any) => ({ key: f.key, label: f.label, value: f.value, isSecret: f.isSecret, reason: f.reason })) }).then((d) => {
       if (d?.ok) { onSaved(); onClose() }
       else setErr(d?.error ?? '保存失败')
     })
   }
 
+  // 设置快捷键：点击后进入捕获态，监听下一次组合键，自动识别并保存
+  const startCapture = () => {
+    setCapturing(true); setErr('')
+  }
+  const cancelCapture = () => setCapturing(false)
+
+  React.useEffect(() => {
+    if (!capturing) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault(); e.stopPropagation()
+      const parts: string[] = []
+      if (e.ctrlKey) parts.push('Ctrl')
+      if (e.altKey) parts.push('Alt')
+      if (e.shiftKey) parts.push('Shift')
+      if (e.metaKey) parts.push('Meta')
+      const k = e.key
+      // 修饰键单独按下不算组合
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(k)) return
+      const keyName = k.length === 1 ? k.toUpperCase() : k
+      const combo = [...parts, keyName].join('+')
+      setCapturing(false)
+      api('/shortcut-save', { name, shortcut: combo }).then((d) => {
+        if (d?.ok) {
+          setSettings((prev: any) => ({ ...prev, shortcut: combo }))
+          onSaved()
+        } else setErr(d?.error ?? '保存快捷键失败')
+      })
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [capturing, name, onSaved])
+
   return (
     <Modal title={`技能设置 — ${name}`} onClose={onClose} width={560}>
-      {loading ? <p style={{ color: 'rgb(173,178,184)', fontSize: 13 }}>加载中…</p>
+      {loading ? <p style={{ color: 'var(--dsw-alias-label-secondary)', fontSize: 13 }}>加载中…</p>
       : err ? <p style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: 13 }}>{err}</p> : (
         <>
-          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'rgb(173,178,184)' }}>
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
             {settings.enabled
               ? '已开启技能设置，以下参数在技能执行时会以你填写的值生效。'
               : '技能设置未开启 —— 在「设置引导」中开启后，这里才能配置可复用参数。'}
           </p>
+
+          {/* 分类 */}
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>分类</label>
+            <input
+              value={settings.category ?? ''}
+              onChange={(e) => setSettings((prev: any) => ({ ...prev, category: e.target.value }))}
+              placeholder="如：创作、工具、效率（可留空）"
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+                borderRadius: 10, padding: '8px 12px', fontSize: 13,
+                color: 'var(--dsw-alias-label-primary)', outline: 'none',
+              }}
+            />
+          </div>
+
+          {/* 快捷键 */}
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>快捷键（快速把技能名填入输入框）</label>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <code style={{
+                flex: 1, padding: '8px 12px', borderRadius: 10, fontSize: 13, textAlign: 'center',
+                background: 'var(--dsw-alias-bg-layer-1)', border: `1px solid ${capturing ? 'var(--dsw-alias-brand-primary, #7c6cf0)' : 'var(--dsw-alias-border-l2)'}`,
+                color: capturing ? 'var(--dsw-alias-brand-primary, #b6aaff)' : 'var(--dsw-alias-label-primary)',
+                fontFamily: 'var(--dsw-font-mono, Menlo, monospace)',
+              }}>
+                {capturing ? '请按下组合键…' : (settings.shortcut ?? '未设置')}
+              </code>
+              {capturing ? (
+                <button type="button" onClick={cancelCapture} style={{
+                  padding: '7px 12px', borderRadius: 8, fontSize: 13,
+                  border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+                  color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer', whiteSpace: 'nowrap',
+                }}>取消</button>
+              ) : (
+                <button type="button" onClick={startCapture} style={{
+                  padding: '7px 12px', borderRadius: 8, fontSize: 13, border: 'none',
+                  background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)', cursor: 'pointer', whiteSpace: 'nowrap',
+                }}>{settings.shortcut ? '重设' : '设置'}</button>
+              )}
+            </div>
+            <p style={{ margin: '4px 0 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+              点击「设置」后按下组合键（如 Ctrl+Shift+1）即自动保存。
+            </p>
+          </div>
+
           {settings.enabled && settings.fields.length === 0 ? (
             <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>
               此技能暂无设置项。可在创建时或「设置引导」中添加可复用参数。
@@ -311,7 +520,7 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
           ) : null}
           {settings.enabled ? settings.fields.map((f: any, idx: number) => (
             <div key={f.key} style={{ marginBottom: 12 }}>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'rgb(173,178,184)', marginBottom: 4 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>
                 {f.label} {f.isSecret ? '（敏感）' : ''}
               </label>
               <input
@@ -321,9 +530,9 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
                 placeholder={f.isSecret ? '••••••••' : '填写值'}
                 style={{
                   width: '100%', boxSizing: 'border-box',
-                  background: 'rgb(53,54,56)', border: '1px solid rgba(255,255,255,0.15)',
+                  background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
                   borderRadius: 10, padding: '8px 12px', fontSize: 13,
-                  color: 'rgb(249,250,251)', outline: 'none',
+                  color: 'var(--dsw-alias-label-primary)', outline: 'none',
                 }}
               />
               {f.reason ? <p style={{ margin: '3px 0 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>{f.reason}</p> : null}
@@ -332,13 +541,13 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
             <button type="button" onClick={onClose} style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 13,
-              border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-              color: 'rgb(249,250,251)', cursor: 'pointer',
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
             }}>取消</button>
             {settings.enabled ? (
               <button type="button" onClick={save} style={{
                 padding: '7px 14px', borderRadius: 8, fontSize: 13, border: 'none',
-                background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: '#fff', cursor: 'pointer',
+                background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)', cursor: 'pointer',
               }}>保存</button>
             ) : null}
           </div>
@@ -348,9 +557,9 @@ function SkillSettingsModal({ name, onClose, onSaved }: { name: string; onClose:
   )
 }
 
-// ── 创建技能弹窗（多步：信息 → 问是否开设置 → 候选列表+理由 → 勾选） ──
+// ── 创建技能弹窗（多步：信息 → 问是否开设置 → 候选列表+理由 → 勾选 → 收尾清单） ──
 function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [step, setStep] = React.useState(1)          // 1 填信息 2 问设置 3 选设置项
+  const [step, setStep] = React.useState(1)          // 1 填信息 2 问设置 3 选设置项 4 收尾清单
   const [name, setName] = React.useState('')
   const [description, setDescription] = React.useState('')
   const [content, setContent] = React.useState('')
@@ -360,6 +569,9 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
   const [busy, setBusy] = React.useState(false)
   const [err, setErr] = React.useState('')
   const [createdName, setCreatedName] = React.useState('')
+  const [showPlugins, setShowPlugins] = React.useState(false)
+  const [showEdit, setShowEdit] = React.useState(false)
+  const [showSettings, setShowSettings] = React.useState(false)
 
   // 步骤2：用户选择是否开启技能设置
   const proceedSetup = (yes: boolean) => {
@@ -377,12 +589,15 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
         } else setErr(d?.error ?? '扫描失败')
       })
     } else {
-      // 不开启设置，直接收尾
-      api('/setup-save', { name: createdName, enabled: false, fields: [] }).then(() => onCreated())
+      // 不开启设置，直接进入收尾清单
+      api('/setup-save', { name: createdName, enabled: false, fields: [] }).then((d) => {
+        if (d?.ok) setStep(4)
+        else setErr(d?.error ?? '保存失败')
+      })
     }
   }
 
-  // 步骤1：创建技能
+  // 步骤1：创建技能（后端返回规范化 name）
   const create = () => {
     if (!name.trim()) return setErr('技能名不能为空')
     setBusy(true)
@@ -404,7 +619,7 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
     setBusy(true)
     api('/setup-save', { name: createdName, enabled: true, fields }).then((d) => {
       setBusy(false)
-      if (d?.ok) onCreated()
+      if (d?.ok) setStep(4)
       else setErr(d?.error ?? '保存失败')
     })
   }
@@ -420,27 +635,29 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
 
   const inputStyle: React.CSSProperties = {
     width: '100%', boxSizing: 'border-box',
-    background: 'rgb(53,54,56)', border: '1px solid rgba(255,255,255,0.15)',
+    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
     borderRadius: 10, padding: '8px 12px', fontSize: 13,
-    color: 'rgb(249,250,251)', outline: 'none',
+    color: 'var(--dsw-alias-label-primary)', outline: 'none',
   }
 
+  const stepTitle = step === 1 ? '新建超级技能' : step === 2 ? '开启技能设置？' : step === 3 ? '选择可复用的设置项' : '创建完成 · 收尾'
+
   return (
-    <Modal title={step === 1 ? '新建技能' : step === 2 ? '开启技能设置？' : '选择可复用的设置项'} onClose={onClose} width={600}>
+    <Modal title={stepTitle} onClose={onClose} width={620}>
       {err ? <p style={{ margin: '0 0 10px', color: 'var(--dsw-alias-state-error-primary)', fontSize: 13 }}>{err}</p> : null}
 
       {step === 1 ? (
         <>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'rgb(173,178,184)', marginBottom: 4 }}>技能名称</label>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>技能名称</label>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：视频生成、网站登录" style={inputStyle} />
           </div>
           <div style={{ marginBottom: 12 }}>
-            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'rgb(173,178,184)', marginBottom: 4 }}>技能描述</label>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>技能描述</label>
             <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="这个技能是做什么的" style={inputStyle} />
           </div>
           <div style={{ marginBottom: 14 }}>
-            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'rgb(173,178,184)', marginBottom: 4 }}>技能内容（SKILL.md 正文）</label>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>技能内容（SKILL.md 正文）</label>
             <textarea
               value={content}
               onChange={(e) => setContent(e.target.value)}
@@ -452,41 +669,41 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <button type="button" onClick={onClose} style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 13,
-              border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-              color: 'rgb(249,250,251)', cursor: 'pointer',
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
             }}>取消</button>
             <button type="button" onClick={create} disabled={busy} style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 13, border: 'none',
-              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: '#fff',
+              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)',
               cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1,
             }}>{busy ? '创建中…' : '创建技能'}</button>
           </div>
         </>
       ) : step === 2 ? (
         <>
-          <p style={{ margin: '0 0 14px', fontSize: 14, color: 'rgb(249,250,251)', lineHeight: 1.6 }}>
+          <p style={{ margin: '0 0 14px', fontSize: 14, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }}>
             技能「{createdName}」创建完成！
             <br />
-            <span style={{ color: 'rgb(173,178,184)', fontSize: 13 }}>
+            <span style={{ color: 'var(--dsw-alias-label-secondary)', fontSize: 13 }}>
               是否开启<strong>技能设置</strong>？开启后会自动扫描技能内容，识别出可复用的参数（如 API 地址、密钥、模型名、时间参数），你可以在设置里填写。
             </span>
           </p>
           <div style={{ display: 'flex', gap: 10 }}>
             <button type="button" onClick={() => proceedSetup(false)} disabled={busy} style={{
               flex: 1, padding: '10px 0', borderRadius: 10, fontSize: 13,
-              border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-              color: 'rgb(173,178,184)', cursor: busy ? 'default' : 'pointer',
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-secondary)', cursor: busy ? 'default' : 'pointer',
             }}>不开，保持纯内容</button>
             <button type="button" onClick={() => proceedSetup(true)} disabled={busy} style={{
               flex: 1, padding: '10px 0', borderRadius: 10, fontSize: 13, border: 'none',
-              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: '#fff',
+              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)',
               cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1,
             }}>{busy ? '扫描中…' : '开启技能设置'}</button>
           </div>
         </>
-      ) : (
+      ) : step === 3 ? (
         <>
-          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'rgb(173,178,184)' }}>
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' }}>
             检测到以下内容适合作为可复用设置项，勾选你希望设为设置的参数：
           </p>
           {candidates.length === 0 ? (
@@ -499,7 +716,7 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
                 <label key={c.key} style={{
                   display: 'flex', alignItems: 'flex-start', gap: 10,
                   padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
-                  background: 'rgb(53,54,56)', border: '1px solid rgba(255,255,255,0.1)',
+                  background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l1)',
                 }}>
                   <input
                     type="checkbox"
@@ -508,10 +725,10 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
                     style={{ marginTop: 2, accentColor: 'var(--dsw-alias-brand-primary, #7c6cf0)' }}
                   />
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ fontSize: 13, fontWeight: 500, color: 'rgb(249,250,251)' }}>
+                    <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
                       {c.label} {c.isSecret ? <span dangerouslySetInnerHTML={{ __html: LOCK_SVG }} /> : ''}
                     </span>
-                    <span style={{ fontSize: 12, color: 'rgb(173,178,184)', lineHeight: 1.5 }}>{c.reason}</span>
+                    <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)', lineHeight: 1.5 }}>{c.reason}</span>
                   </span>
                 </label>
               ))}
@@ -520,14 +737,141 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <button type="button" onClick={() => proceedSetup(false)} style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 13,
-              border: '1px solid rgba(255,255,255,0.15)', background: 'transparent',
-              color: 'rgb(173,178,184)', cursor: 'pointer',
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
             }}>跳过设置</button>
             <button type="button" onClick={saveSetup} disabled={busy} style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 13, border: 'none',
-              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: '#fff',
+              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)',
               cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1,
             }}>{busy ? '保存中…' : '完成'}</button>
+          </div>
+        </>
+      ) : (
+        <>
+          {/* 收尾清单 */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <span style={{ flex: 'none', fontSize: 20 }}>🎉</span>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }}>技能「{createdName}」已创建并规范化</div>
+              <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>保存于 /root/.dsh/skills/{createdName}/SKILL.md（x-user-created: true，已纳入管理）</div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)', letterSpacing: '.05em', textTransform: 'uppercase' }}>收尾清单</div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l1)' }}>
+              <span style={{ fontSize: 13, color: 'var(--dsw-alias-state-success-primary)', fontWeight: 600 }}>✓</span>
+              <span style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>技能内容与描述</span>
+              <button type="button" onClick={() => setShowEdit(true)} style={{ marginLeft: 'auto', padding: '4px 10px', borderRadius: 6, fontSize: 12, border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer' }}>编辑</button>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l1)' }}>
+              <span style={{ fontSize: 13, color: enableSettings ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-label-tertiary)', fontWeight: 600 }}>{enableSettings ? '✓' : '○'}</span>
+              <span style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>{enableSettings ? `技能设置已开启（${checked.size} 项）` : '技能设置未开启'}</span>
+              <button type="button" onClick={() => setShowSettings(true)} style={{ marginLeft: 'auto', padding: '4px 10px', borderRadius: 6, fontSize: 12, border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer' }}>设置</button>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px', borderRadius: 10, background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l1)' }}>
+              <span style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>○</span>
+              <span style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary)' }}>配套插件（如需）</span>
+              <button type="button" onClick={() => setShowPlugins(true)} style={{ marginLeft: 'auto', padding: '4px 10px', borderRadius: 6, fontSize: 12, border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent', color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer' }}>关联插件</button>
+            </div>
+          </div>
+
+          <div style={{ padding: '9px 12px', borderRadius: 10, marginBottom: 14, background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 9%, transparent)', border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 30%, transparent)', fontSize: 12, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }}>
+            💡 技能需要配套插件时，请把它做成<strong>永久插件</strong>（安装进 profile，如 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-agimg</code>），重启后依然生效；不要用动态插件（进程重启即失效）。
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button type="button" onClick={() => { onCreated() }} style={{
+              padding: '7px 16px', borderRadius: 8, fontSize: 13, border: 'none',
+              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)', cursor: 'pointer',
+            }}>完成</button>
+          </div>
+        </>
+      )}
+
+      {showPlugins ? <PluginModal name={createdName} onClose={() => setShowPlugins(false)} onChanged={() => { /* 刷新父列表由 onCreated 完成 */ }} /> : null}
+      {showEdit ? <EditModal name={createdName} onClose={() => setShowEdit(false)} onSaved={() => { /* 编辑保存后内容即更新 */ }} /> : null}
+      {showSettings ? <SkillSettingsModal name={createdName} onClose={() => setShowSettings(false)} onSaved={() => { /* 设置保存后刷新 */ }} /> : null}
+    </Modal>
+  )
+}
+
+// ── 编辑弹窗（SKILL.md 描述+正文，可保存回写） ──────────────
+function EditModal({ name, onClose, onSaved }: { name: string; onClose: () => void; onSaved?: () => void }) {
+  const [data, setData] = React.useState<any>(null)
+  const [description, setDescription] = React.useState('')
+  const [body, setBody] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [err, setErr] = React.useState('')
+
+  React.useEffect(() => {
+    api(`/content?name=${encodeURIComponent(name)}`).then((d) => {
+      if (d?.ok) {
+        setData(d)
+        setDescription(d.meta?.description ?? '')
+        setBody(d.body ?? d.content ?? '')
+      } else setErr(d?.error ?? '读取失败')
+    })
+  }, [name])
+
+  const save = () => {
+    setBusy(true); setErr('')
+    api('/save-content', { name, description, body }).then((d) => {
+      setBusy(false)
+      if (d?.ok) { onSaved?.(); onClose() }
+      else setErr(d?.error ?? '保存失败')
+    })
+  }
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%', boxSizing: 'border-box',
+    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: 10, padding: '8px 12px', fontSize: 13,
+    color: 'var(--dsw-alias-label-primary)', outline: 'none',
+  }
+
+  return (
+    <Modal title={`编辑技能内容 — ${name}`} onClose={onClose} width={760}>
+      {err ? <p style={{ margin: '0 0 10px', color: 'var(--dsw-alias-state-error-primary)', fontSize: 13 }}>{err}</p>
+      : !data ? <p style={{ color: 'var(--dsw-alias-label-secondary)', fontSize: 13 }}>加载中…</p> : (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'nowrap' }}>技能名（不可改）</span>
+            <code style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary)', fontFamily: 'var(--dsw-font-mono, Menlo, monospace)', background: 'var(--dsw-alias-bg-layer-1)', padding: '4px 10px', borderRadius: 8 }}>
+              {data.meta?.name ?? name}
+            </code>
+            <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+              {data.kind === 'directory' ? '目录技能' : '单个技能'} · {data.files?.length ?? 0} 个文件
+            </span>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>技能描述（会展示在技能列表与模型目录中）</label>
+            <input value={description} onChange={(e) => setDescription(e.target.value)} style={inputStyle} />
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 500, color: 'var(--dsw-alias-label-secondary)', marginBottom: 4 }}>SKILL.md 正文</label>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={18}
+              style={{ ...inputStyle, resize: 'vertical', fontFamily: 'var(--dsw-font-mono, ui-monospace, Menlo, monospace)', fontSize: 12, lineHeight: 1.6 }}
+            />
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <button type="button" onClick={onClose} style={{
+              padding: '7px 14px', borderRadius: 8, fontSize: 13,
+              border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+              color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
+            }}>取消</button>
+            <button type="button" disabled={busy} onClick={save} style={{
+              padding: '7px 14px', borderRadius: 8, fontSize: 13, border: 'none',
+              background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)',
+              cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1,
+            }}>{busy ? '保存中…' : '保存'}</button>
           </div>
         </>
       )}
@@ -535,57 +879,103 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
   )
 }
 
-// ── 编辑弹窗（技能内容） ──────────────────────────────
-function EditModal({ name, onClose }: { name: string; onClose: () => void }) {
-  const [data, setData] = React.useState<any>(null)
-  const [tab, setTab] = React.useState<'readme' | 'pkg' | 'entry'>('readme')
+// ── 关联插件弹窗（归属/审计 + 永久插件引导） ────────────
+function PluginModal({ name, onClose, onChanged }: { name: string; onClose: () => void; onChanged: () => void }) {
+  const [plugins, setPlugins] = React.useState<Array<{ id: string; name?: string; packageId?: string; attachedAt?: string }>>([])
+  const [pluginId, setPluginId] = React.useState('')
+  const [pluginName, setPluginName] = React.useState('')
+  const [busy, setBusy] = React.useState('')
   const [err, setErr] = React.useState('')
 
-  React.useEffect(() => {
-    api(`/content?name=${encodeURIComponent(name)}`).then((d) => {
-      if (d?.ok) setData(d)
-      else setErr(d?.error ?? '读取失败')
+  const loadPlugins = React.useCallback(() => {
+    api(`/settings-get?name=${encodeURIComponent(name)}`).then((d) => {
+      if (d?.ok) setPlugins(d.settings?.plugins ?? [])
     })
   }, [name])
 
-  const codeStyle: React.CSSProperties = {
-    background: 'rgb(30,31,33)', border: '1px solid rgba(255,255,255,0.1)',
-    borderRadius: 10, padding: 12, fontSize: 12, lineHeight: 1.55,
-    fontFamily: 'var(--dsw-font-mono, ui-monospace, Menlo, monospace)',
-    color: 'rgb(210, 215, 220)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-    maxHeight: '48vh', overflow: 'auto', margin: 0,
+  React.useEffect(() => {
+    loadPlugins()
+  }, [loadPlugins])
+
+  const attach = () => {
+    const pid = pluginId.trim()
+    if (!pid) return setErr('请输入插件标识')
+    setBusy(pid); setErr('')
+    api('/plugin-attach', { skill: name, pluginId: pid, name: pluginName.trim() || undefined }).then((d) => {
+      setBusy('')
+      if (d?.ok) { setPluginId(''); setPluginName(''); loadPlugins(); onChanged() }
+      else setErr(d?.error ?? '关联失败')
+    })
+  }
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%', boxSizing: 'border-box',
+    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
+    borderRadius: 10, padding: '8px 12px', fontSize: 13,
+    color: 'var(--dsw-alias-label-primary)', outline: 'none',
   }
 
   return (
-    <Modal title={`技能内容 — ${name}`} onClose={onClose} width={720}>
-      {err ? <p style={{ color: 'var(--dsw-alias-state-error-primary)', fontSize: 13 }}>{err}</p>
-      : !data ? <p style={{ color: 'rgb(173,178,184)', fontSize: 13 }}>加载中…</p> : (
-        <>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
-            {([['readme', '说明文档'], ['pkg', 'package.json'], ['entry', '入口代码']] as const).map(([k, label]) => (
-              <button key={k} type="button" onClick={() => setTab(k)} style={{
-                padding: '4px 12px', borderRadius: 999, fontSize: 12,
-                border: `1px solid ${tab === k ? 'var(--dsw-alias-brand-primary, #7c6cf0)' : 'rgba(255,255,255,0.15)'}`,
-                background: tab === k ? 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 15%, transparent)' : 'transparent',
-                color: tab === k ? 'var(--dsw-alias-brand-primary, #a78bfa)' : 'rgb(173,178,184)',
-                cursor: 'pointer',
-              }}>{label}</button>
+    <Modal title={`关联插件 — ${name}`} onClose={onClose} width={600}>
+      {/* 永久插件强调 */}
+      <div style={{
+        display: 'flex', gap: 10, padding: '10px 12px', borderRadius: 10, marginBottom: 12,
+        background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 10%, transparent)',
+        border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 35%, transparent)',
+      }}>
+        <span style={{ flex: 'none', fontSize: 16, lineHeight: '20px' }}>🔌</span>
+        <span style={{ fontSize: 12.5, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }}>
+          <strong>什么是「关联插件」</strong>：每个技能在运行时可能需要一个配套插件来执行实际工作（例如 agnes-image 技能由 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-agimg</code> 插件渲染图片，agnes-video 技能由 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-ovkovk</code> 插件驱动视频生成）。关联就是把配套插件记录到本技能，方便追踪技能由哪些插件驱动。
+          <br /><br />
+          <strong>配套插件请做成「永久插件」</strong>：把代码放到 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>/vol1/1000/DeepSeek/dsh-xxx</code> 并安装进 profile
+          （<code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>package.json dependencies + dsh.profile.bundles</code>），重启后依然生效。
+          <br />
+          <strong style={{ color: 'var(--dsw-alias-state-error-primary, #ef4444)' }}>不要用动态插件</strong>（cordis 临时注册）做配套插件——动态插件在进程重启后会丢失，技能随之失效。
+        </span>
+      </div>
+
+      {err ? <p style={{ margin: '0 0 10px', color: 'var(--dsw-alias-state-error-primary)', fontSize: 13 }}>{err}</p> : null}
+
+      {/* 已关联 */}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)', letterSpacing: '.05em', textTransform: 'uppercase', margin: '0 0 8px' }}>
+          已关联插件（{plugins.length}）
+        </div>
+        {plugins.length === 0 ? (
+          <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>尚未关联任何插件。</p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {plugins.map(p => (
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l1)' }}>
+                <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)', minWidth: 120 }}>{p.name || p.id}</span>
+                <code style={{ fontSize: 11, color: 'var(--dsw-alias-label-secondary)', fontFamily: 'var(--dsw-font-mono, Menlo, monospace)' }}>{p.id}</code>
+                {p.packageId ? <span style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>{p.packageId}</span> : null}
+              </div>
             ))}
           </div>
-          {tab === 'readme' && (data.readme
-            ? <pre style={codeStyle}>{data.readme}</pre>
-            : <p style={{ color: 'rgb(173,178,184)', fontSize: 13 }}>该技能没有 README/SKILL.md 说明文档</p>)}
-          {tab === 'pkg' && <pre style={codeStyle}>{JSON.stringify(data.pkg, null, 2)}</pre>}
-          {tab === 'entry' && (data.entry
-            ? <pre style={codeStyle}>{data.entry}</pre>
-            : <p style={{ color: 'rgb(173,178,184)', fontSize: 13 }}>未找到入口文件（{data.entryPath || 'lib/index.js'}）</p>)}
-          {data.files ? (
-            <p style={{ margin: '10px 0 0', fontSize: 12, color: 'rgb(140,146,152)' }}>
-              文件：{data.files.join('、')}
-            </p>
-          ) : null}
-        </>
-      )}
+        )}
+      </div>
+
+      {/* 手动关联：仅当该技能确实用到某个插件时填写 */}
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)', letterSpacing: '.05em', textTransform: 'uppercase', margin: '0 0 8px' }}>手动关联</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input value={pluginId} onChange={(e) => setPluginId(e.target.value)} placeholder="插件标识，如 dsh-agimg / agimg-1" style={inputStyle} />
+          <input value={pluginName} onChange={(e) => setPluginName(e.target.value)} placeholder="显示名（可选）" style={{ ...inputStyle, flex: '0 0 30%' }} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        <button type="button" onClick={onClose} style={{
+          padding: '7px 14px', borderRadius: 8, fontSize: 13,
+          border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+          color: 'var(--dsw-alias-label-primary)', cursor: 'pointer',
+        }}>关闭</button>
+        <button type="button" disabled={!!busy} onClick={attach} style={{
+          padding: '7px 14px', borderRadius: 8, fontSize: 13, border: 'none',
+          background: 'var(--dsw-alias-brand-primary, #7c6cf0)', color: 'var(--dsw-alias-label-primary-inverted, #fff)',
+          cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1,
+        }}>关联</button>
+      </div>
     </Modal>
   )
 }
@@ -600,16 +990,22 @@ function SkillCard({ skill, onChanged, onEdit }: {
   const [hovered, setHovered] = React.useState(false)
   const [showDelete, setShowDelete] = React.useState(false)
   const [showSettings, setShowSettings] = React.useState(false)
+  const [showPlugins, setShowPlugins] = React.useState(false)
   const [showDetail, setShowDetail] = React.useState(false)
+  const [showToggleConfirm, setShowToggleConfirm] = React.useState(false)
+  const [notice, setNotice] = React.useState('')
+  const noticeTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const toggle = () => {
-    setBusy('toggle')
-    api('/toggle', { name: skill.name, enabled: !skill.enabled }).then((r) => {
-      setBusy('')
-      if (r?.ok) onChanged()
-      else alert(r?.error ?? '操作失败')
-    })
+  const flashNotice = (msg: string) => {
+    setNotice(msg)
+    if (noticeTimer.current) clearTimeout(noticeTimer.current)
+    noticeTimer.current = setTimeout(() => setNotice(''), 5000)
   }
+
+  React.useEffect(() => () => {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current)
+  }, [])
+
   const doDelete = () => {
     setBusy('delete')
     api('/delete', { name: skill.name, confirm: 'yes' }).then((r) => {
@@ -620,28 +1016,53 @@ function SkillCard({ skill, onChanged, onEdit }: {
     })
   }
   const doToggle = () => {
+    setShowToggleConfirm(false)
     setBusy('toggle')
     api('/toggle', { name: skill.name, enabled: !skill.enabled }).then((r) => {
       setBusy('')
-      if (r?.ok) onChanged()
-      else alert(r?.error ?? '操作失败')
+      if (r?.ok) {
+        onChanged()
+        flashNotice(skill.enabled
+          ? `已禁用「${skill.name}」—— 新会话立即生效；当前会话中它仍在目录里，新建会话后消失。`
+          : `已启用「${skill.name}」—— 新会话将重新加载该技能。`)
+      } else alert(r?.error ?? '操作失败')
     })
   }
 
   const footBtn: React.CSSProperties = {
     display: 'inline-flex', alignItems: 'center', gap: 5,
     padding: '5px 10px', borderRadius: 8, fontSize: 12,
-    border: '1px solid rgba(255,255,255,0.12)', background: 'transparent',
-    color: 'rgb(200, 205, 210)', cursor: 'pointer',
+    border: '1px solid var(--dsw-alias-border-l2)', background: 'transparent',
+    color: 'var(--dsw-alias-label-secondary)', cursor: 'pointer',
     transition: 'background .12s, color .12s, border-color .12s',
+  }
+
+  // 悬停效果：鼠标进入时底色/边框加深为强调色，离开恢复原值（内联 style 无法用 :hover 伪类）
+  const makeHover = (color: string) => {
+    let origBg = '', origBd = ''
+    return {
+      onMouseEnter: (e: React.MouseEvent<HTMLButtonElement>) => {
+        const el = e.currentTarget
+        if (el.disabled) return
+        if (!origBg && el.style.background) origBg = el.style.background
+        if (!origBd && el.style.borderColor) origBd = el.style.borderColor
+        el.style.background = `color-mix(in srgb, ${color} 18%, transparent)`
+        el.style.borderColor = `color-mix(in srgb, ${color} 60%, transparent)`
+      },
+      onMouseLeave: (e: React.MouseEvent<HTMLButtonElement>) => {
+        const el = e.currentTarget
+        el.style.background = origBg || 'transparent'
+        el.style.borderColor = origBd || 'var(--dsw-alias-border-l2)'
+      },
+    }
   }
 
   return (
     <li
       style={{
-        border: `1px solid ${hovered ? 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 60%, transparent)' : 'rgba(255,255,255,0.12)'}`,
+        border: `1px solid ${hovered ? 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 60%, transparent)' : 'var(--dsw-alias-border-l2)'}`,
         boxShadow: hovered ? '0 0 0 1px rgba(124,108,240,0.25), 0 4px 16px rgba(124,108,240,0.12)' : 'none',
-        background: hovered ? 'rgba(124,108,240,0.05)' : 'rgb(53, 54, 56)',
+        background: hovered ? 'rgba(124,108,240,0.05)' : 'var(--dsw-alias-bg-layer-1)',
         borderRadius: 12, display: 'flex', flexDirection: 'column',
         listStyle: 'none', overflow: 'hidden', cursor: 'pointer',
         transition: 'border-color .15s ease, box-shadow .15s ease, background .15s ease',
@@ -660,22 +1081,39 @@ function SkillCard({ skill, onChanged, onEdit }: {
       >
         {/* 名称行 + 状态 badge */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'rgb(249, 250, 251)' }}>
+          <span style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary)' }}>
             {skill.name}
           </span>
           <span style={{
-            whiteSpace: 'nowrap', border: '1px solid rgba(255,255,255,0.14)',
+            whiteSpace: 'nowrap', border: '1px solid var(--dsw-alias-border-l2)',
             borderRadius: 999, padding: '1px 8px', fontSize: 11, fontWeight: 500,
-            color: 'rgb(173,178,184)',
+            color: 'var(--dsw-alias-label-secondary)',
           }}>
             {skill.kind === 'directory' ? '目录技能' : '单个技能'}
           </span>
+          {skill.category ? (
+            <span style={{
+              whiteSpace: 'nowrap', borderRadius: 999, padding: '1px 8px', fontSize: 11, fontWeight: 500,
+              background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 14%, transparent)',
+              color: 'var(--dsw-alias-brand-primary, #b6aaff)',
+              border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 35%, transparent)',
+            }}>
+              {skill.category}
+            </span>
+          ) : null}
+          {skill.shortcut ? (
+            <kbd style={{
+              whiteSpace: 'nowrap', borderRadius: 6, padding: '1px 6px', fontSize: 10,
+              border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-tertiary)',
+              fontFamily: 'var(--dsw-font-mono, Menlo, monospace)',
+            }}>{skill.shortcut}</kbd>
+          ) : null}
           <span style={{
             marginLeft: 'auto', whiteSpace: 'nowrap', borderRadius: 999,
             padding: '1px 8px', fontSize: 11, fontWeight: 500,
-            background: skill.enabled ? 'rgb(249, 250, 251)' : 'transparent',
-            color: skill.enabled ? 'rgb(53, 54, 56)' : 'rgb(173,178,184)',
-            border: skill.enabled ? 'none' : '1px solid rgba(255,255,255,0.14)',
+            background: skill.enabled ? 'var(--dsw-alias-bg-base)' : 'transparent',
+            color: skill.enabled ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+            border: skill.enabled ? 'none' : '1px solid var(--dsw-alias-border-l2)',
           }}>
             {skill.enabled ? '已启用' : '已禁用'}
           </span>
@@ -683,40 +1121,77 @@ function SkillCard({ skill, onChanged, onEdit }: {
         {/* 描述 */}
         {skill.description ? (
           <div style={{
-            color: 'rgb(173,178,184)', fontSize: 13, lineHeight: 1.55,
+            color: 'var(--dsw-alias-label-secondary)', fontSize: 13, lineHeight: 1.55,
             display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', overflow: 'hidden',
             minHeight: 42,
           }}>
             {skill.description}
           </div>
         ) : null}
+        {/* 关联插件（归属/审计） */}
+        {Array.isArray(skill.plugins) && skill.plugins.length > 0 ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+            <button type="button" onClick={(e) => { e.stopPropagation(); setShowPlugins(true) }} title="管理关联插件（推荐永久插件）"
+              style={{
+                whiteSpace: 'nowrap', borderRadius: 6, padding: '1px 7px', fontSize: 11, fontWeight: 600,
+                background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 14%, transparent)',
+                color: 'var(--dsw-alias-brand-primary, #b6aaff)',
+                border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 35%, transparent)',
+                cursor: 'pointer',
+              }}>
+              🔌 {skill.plugins.length} 个关联插件
+            </button>
+            {skill.plugins.map((p: any) => (
+              <span key={p?.id ?? ''} title={`插件：${p?.name ?? ''}\npluginId：${p?.id ?? ''}`} style={{
+                whiteSpace: 'nowrap', borderRadius: 6, padding: '1px 7px', fontSize: 11,
+                background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 8%, transparent)',
+                color: 'var(--dsw-alias-label-secondary)',
+                border: '1px solid var(--dsw-alias-border-l2)',
+              }}>
+                {p?.id ?? ''}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {/* 来源 */}
         <div style={{
           fontFamily: 'var(--dsw-font-mono, Menlo, monospace)', fontSize: 11,
-          color: 'rgb(130, 136, 142)', marginTop: 'auto',
+          color: 'var(--dsw-alias-label-tertiary)', marginTop: 'auto',
         }}>
           {skill.source}
         </div>
       </div>
 
       {/* 底部按钮行：图标在上文字在下，小字 */}
-      <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', justifyContent: 'flex-end', gap: 2, padding: '6px 8px', display: 'flex' }}>
-        <button type="button" disabled={!!busy} onClick={(e) => { e.stopPropagation(); doToggle() }} title={skill.enabled ? '禁用技能（DSH 将不再加载）' : '启用技能'}
+      <div style={{ borderTop: '1px solid var(--dsw-alias-border-l1)', justifyContent: 'flex-end', gap: 2, padding: '5px 6px', display: 'flex', flexWrap: 'wrap' }}>
+        <button type="button" disabled={!!busy} {...makeHover(skill.enabled ? 'var(--dsw-alias-state-success-primary, #22c55e)' : 'var(--dsw-alias-state-error-primary, #ef4444)')} onClick={(e) => { e.stopPropagation(); setShowToggleConfirm(true) }} title={skill.enabled ? '禁用技能（DSH 将不再加载）' : '启用技能'}
           style={{
             ...footBtn, flexDirection: 'column', gap: 2, padding: '4px 8px',
             fontSize: 11, opacity: busy === 'toggle' ? .6 : 1,
+            // 颜色标志：已启用=成功绿，已禁用=错误红
+            color: skill.enabled ? 'var(--dsw-alias-state-success-primary, #22c55e)' : 'var(--dsw-alias-state-error-primary, #ef4444)',
+            borderColor: busy === 'toggle'
+              ? 'var(--dsw-alias-border-l2)'
+              : `color-mix(in srgb, ${skill.enabled ? 'var(--dsw-alias-state-success-primary, #22c55e)' : 'var(--dsw-alias-state-error-primary, #ef4444)'} 45%, transparent)`,
+            background: busy === 'toggle' ? 'transparent' : `color-mix(in srgb, ${skill.enabled ? 'var(--dsw-alias-state-success-primary, #22c55e)' : 'var(--dsw-alias-state-error-primary, #ef4444)'} 12%, transparent)`,
           }}>
-          <Ic.power size={12} /> {busy === 'toggle' ? '处理中…' : skill.enabled ? '禁用' : '启用'}
+          {busy === 'toggle'
+            ? <><span className="dsh-sk-spin"><Ic.power size={12} /></span> 处理中…</>
+            : <><Ic.power size={12} /> {skill.enabled ? '禁用' : '启用'}</>}
         </button>
-        <button type="button" disabled={!!busy} onClick={(e) => { e.stopPropagation(); onEdit(skill.name) }} title="查看技能内容"
+        <button type="button" disabled={!!busy} {...makeHover('var(--dsw-alias-brand-primary, #7c6cf0)')} onClick={(e) => { e.stopPropagation(); onEdit(skill.name) }} title="编辑技能内容（描述 + SKILL.md 正文）"
           style={{ ...footBtn, flexDirection: 'column', gap: 2, padding: '4px 8px', fontSize: 11 }}>
           <Ic.edit size={12} /> 编辑
         </button>
-        <button type="button" disabled={!!busy} onClick={(e) => { e.stopPropagation(); setShowSettings(true) }} title={skill.settingsEnabled ? '配置技能参数设置' : '技能设置未开启（创建时选择不开设置）'}
+        <button type="button" disabled={!!busy} {...makeHover('var(--dsw-alias-brand-primary, #7c6cf0)')} onClick={(e) => { e.stopPropagation(); setShowPlugins(true) }} title="关联技能配套插件（推荐永久插件）"
+          style={{ ...footBtn, flexDirection: 'column', gap: 2, padding: '4px 8px', fontSize: 11 }}>
+          <Ic.plug size={12} /> 插件
+        </button>
+        <button type="button" disabled={!!busy} {...(skill.settingsEnabled ? makeHover('var(--dsw-alias-brand-primary, #7c6cf0)') : {})} onClick={(e) => { e.stopPropagation(); setShowSettings(true) }} title={skill.settingsEnabled ? '配置技能参数设置' : '技能设置未开启（创建时选择不开设置）'}
           style={{ ...footBtn, flexDirection: 'column', gap: 2, padding: '4px 8px', fontSize: 11, opacity: skill.settingsEnabled ? 1 : .45, cursor: skill.settingsEnabled ? 'pointer' : 'default' }}>
           <Ic.settings size={12} /> 设置
         </button>
-        <button type="button" disabled={!!busy} onClick={(e) => { e.stopPropagation(); setShowDelete(true) }} title="删除技能"
+        <button type="button" disabled={!!busy} {...makeHover('var(--dsw-alias-state-error-primary, #ef4444)')} onClick={(e) => { e.stopPropagation(); setShowDelete(true) }} title="删除技能"
           style={{
             ...footBtn, flexDirection: 'column', gap: 2, padding: '4px 8px', fontSize: 11,
             color: 'var(--dsw-alias-state-error-primary, #ef4444)',
@@ -726,26 +1201,43 @@ function SkillCard({ skill, onChanged, onEdit }: {
         </button>
       </div>
 
+      {showToggleConfirm ? (
+        <ToggleConfirm name={skill.name} enabled={skill.enabled} onCancel={() => setShowToggleConfirm(false)} onConfirm={doToggle} />
+      ) : null}
       {showDelete ? (
         <DeleteConfirm name={skill.name} onCancel={() => setShowDelete(false)} onConfirm={doDelete} />
       ) : null}
       {showSettings ? (
         <SkillSettingsModal name={skill.name} onClose={() => setShowSettings(false)} onSaved={onChanged} />
       ) : null}
+      {showPlugins ? (
+        <PluginModal name={skill.name} onClose={() => setShowPlugins(false)} onChanged={onChanged} />
+      ) : null}
       {showDetail ? (
         <SkillDetailModal name={skill.name} skill={skill} onClose={() => setShowDetail(false)} onChanged={onChanged} onEdit={onEdit} />
+      ) : null}
+      {notice ? (
+        <div style={{
+          padding: '7px 12px', fontSize: 12, lineHeight: 1.5,
+          color: 'var(--dsw-alias-label-secondary)',
+          background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 8%, transparent)',
+          borderTop: '1px solid var(--dsw-alias-border-l1)',
+        }}>
+          {notice}
+        </div>
       ) : null}
     </li>
   )
 }
 
-// ── 技能管理菜单页（settings.section 内容） ───────────
+// ── 超级技能菜单页（settings.section 内容） ───────────
 function SkillManagerSection({ ctx }: { ctx?: any }) {
   const [skills, setSkills] = React.useState<Skill[]>([])
   const [stats, setStats] = React.useState<{ total: number; unmanaged: number; managed: number }>({ total: 0, unmanaged: 0, managed: 0 })
   const [loading, setLoading] = React.useState(true)
   const [editName, setEditName] = React.useState('')
   const [showCreate, setShowCreate] = React.useState(false)
+  const [activeCat, setActiveCat] = React.useState('全部')
 
   const load = React.useCallback(() => {
     setLoading(true)
@@ -760,51 +1252,12 @@ function SkillManagerSection({ ctx }: { ctx?: any }) {
 
   React.useEffect(() => { load() }, [load])
 
-  // 点「新建技能」→ 当前会话输入框注入提示词（不新建会话/工作区）
+  // 点「新建超级技能」→ 当前会话输入框注入提示词（不新建会话/工作区）
   const injectCreatePrompt = () => {
     const PREFIX = '新建一个技能：'
     const done = injectIntoInput(PREFIX)
     closeSettings()
     void done
-  }
-
-  // 注入输入框（DSH 双图层：textarea 透明 + backdrop 渲染。必须同步 React tracker 才能让 backdrop 显示）
-  const injectIntoInput = (v: string) => {
-    const ta = document.querySelector<HTMLTextAreaElement>('textarea[data-phase]')
-    if (!ta) return false
-    try {
-      // 1) 清 React value tracker（否则 setter 被忽略）
-      const tracker = (ta as any)._valueTracker
-      if (tracker) tracker.setValue('')
-      // 2) 原生 setter 设值（React 受控标准方式）
-      const protoSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
-      if (protoSetter) {
-        protoSetter.call(ta, v)
-        ta.dispatchEvent(new Event('input', { bubbles: true }))
-      } else {
-        ta.value = v
-      }
-      // 3) 兜底：确认 backdrop 同步（必要时重设）
-      const syncBackdrop = () => {
-        const cont = ta.parentElement
-        const backdrop = cont ? [...cont.querySelectorAll('*')].find((el: any) => el.className && String(el.className).includes('backdrop')) : null
-        if (backdrop && backdrop.textContent !== v) {
-          // backdrop 没同步 → 再触发一次（模拟真实输入：先清空再输入）
-          if (tracker) tracker.setValue('')
-          if (protoSetter) {
-            protoSetter.call(ta, v)
-            ta.dispatchEvent(new Event('input', { bubbles: true }))
-          }
-        }
-      }
-      setTimeout(syncBackdrop, 100)
-      setTimeout(syncBackdrop, 500)
-    } catch {
-      ta.value = v
-    }
-    ta.focus()
-    try { ta.setSelectionRange(v.length, v.length) } catch { /* ignore */ }
-    return true
   }
 
   // 关闭设置面板（ESC）
@@ -825,27 +1278,40 @@ function SkillManagerSection({ ctx }: { ctx?: any }) {
     // 轮询监听：列表变化（新技能创建成功）自动刷新
     const iv = setInterval(() => {
       if (disposed) return
-      const pending = window.__skillskillPendingCreate
+      const pending = window.__veryskillPendingCreate
       if (pending && Date.now() - pending.t > 2000) {
-        window.__skillskillPendingCreate = undefined
+        window.__veryskillPendingCreate = undefined
         load()
       }
     }, 2500)
     return () => { disposed = true; clearInterval(iv) }
   }, [load])
 
+  // 分类列表（去重 + "全部"）
+  const categories = React.useMemo(() => {
+    const cats = new Set(skills.map(s => (s.category || '').trim()).filter(Boolean))
+    return ['全部', ...Array.from(cats).sort()]
+  }, [skills])
+
+  // 按当前分类过滤
+  const filteredSkills = React.useMemo(() => {
+    if (activeCat === '全部') return skills
+    return skills.filter(s => (s.category || '').trim() === activeCat)
+  }, [skills, activeCat])
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 720 }}>
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }}>技能管理</h2>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, color: 'var(--dsw-alias-label-primary)' }}>超级技能</h2>
           <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>
             管理用户创建的技能 — 启用/禁用、设置、查看内容、删除
           </p>
         </div>
         <button
           type="button"
-          onClick={injectCreatePrompt}
+          onClick={() => setShowCreate(true)}
+          title="打开创建弹窗（也可在输入框输入「新建一个技能：xxx」快捷创建）"
           style={{
             padding: '5px 12px', borderRadius: 8, fontSize: 13, fontWeight: 500,
             border: '1px solid var(--dsw-alias-border-l2)',
@@ -855,8 +1321,34 @@ function SkillManagerSection({ ctx }: { ctx?: any }) {
           }}
           onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover)'; e.currentTarget.style.borderColor = 'var(--dsw-alias-label-dimmed)' }}
           onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--dsw-alias-bg-layer-1)'; e.currentTarget.style.borderColor = 'var(--dsw-alias-border-l2)' }}
-        >＋ 新建技能</button>
+        >＋ 新建超级技能</button>
       </div>
+
+      {/* 分类标签（顶部横排，主题变量） */}
+      {categories.length > 1 ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          {categories.map(cat => (
+            <button key={cat} type="button" onClick={() => setActiveCat(cat)}
+              style={{
+                whiteSpace: 'nowrap', borderRadius: 999, padding: '4px 12px',
+                fontSize: 12, lineHeight: 1.5, border: '1px solid', cursor: 'pointer',
+                transition: 'background .12s, color .12s, borderColor .12s',
+                background: activeCat === cat
+                  ? 'var(--dsw-alias-brand-primary, #7c6cf0)'
+                  : 'transparent',
+                borderColor: activeCat === cat
+                  ? 'var(--dsw-alias-brand-primary, #7c6cf0)'
+                  : 'var(--dsw-alias-border-l2)',
+                color: activeCat === cat
+                  ? 'var(--dsw-alias-label-primary-inverted, #fff)'
+                  : 'var(--dsw-alias-label-secondary)',
+              }}
+              onMouseEnter={(e) => { if (activeCat !== cat) { e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 12%, transparent)'; e.currentTarget.style.borderColor = 'var(--dsw-alias-label-dimmed)' } }}
+              onMouseLeave={(e) => { if (activeCat !== cat) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'var(--dsw-alias-border-l2)' } }}
+            >{cat}</button>
+          ))}
+        </div>
+      ) : null}
 
       {loading ? (
         <div style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>加载中…</div>
@@ -864,27 +1356,34 @@ function SkillManagerSection({ ctx }: { ctx?: any }) {
         <div style={{
           fontSize: 13, color: 'var(--dsw-alias-label-tertiary)',
           padding: 16, borderRadius: 12, textAlign: 'center',
-          border: '1px dashed rgba(255,255,255,0.15)',
+          border: '1px dashed var(--dsw-alias-border-l2)',
         }}>
-          暂无用户创建的技能。点击「新建技能」创建你的第一个技能。
+          暂无用户创建的技能。点击「新建超级技能」创建你的第一个技能。
         </div>
       ) : (
-        <ul style={{
-          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(268px, 1fr))',
-          gridAutoRows: '1fr', gap: 12, margin: 0, padding: 0, listStyle: 'none',
-        }}>
-          {skills.map(s => (
-            <SkillCard key={s.name} skill={s} onChanged={load} onEdit={setEditName} />
-          ))}
-        </ul>
+        <>
+          {activeCat !== '全部' ? (
+            <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+              {activeCat} · 共 {filteredSkills.length} 个技能
+            </div>
+          ) : null}
+          <ul style={{
+            display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+            gridAutoRows: '1fr', gap: 12, margin: 0, padding: 0, listStyle: 'none',
+          }}>
+            {filteredSkills.map(s => (
+              <SkillCard key={s.name} skill={s} onChanged={load} onEdit={setEditName} />
+            ))}
+          </ul>
+        </>
       )}
 
       {/* 底部状态栏 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '10px 14px', borderRadius: 10,
-        background: 'var(--dsw-alias-bg-layer-3, rgba(255,255,255,0.04))',
-        border: '1px solid rgba(255,255,255,0.08)',
+        background: 'var(--dsw-alias-bg-layer-3, var(--dsw-alias-border-l1))',
+        border: '1px solid var(--dsw-alias-border-l1)',
         fontSize: 12, color: 'var(--dsw-alias-label-tertiary)',
         marginTop: 8,
       }}>
@@ -895,13 +1394,13 @@ function SkillManagerSection({ ctx }: { ctx?: any }) {
         <span>技能目录总计：<strong style={{ color: 'var(--dsw-alias-label-primary)' }}>{stats.total}</strong></span>
       </div>
 
-      {editName ? <EditModal name={editName} onClose={() => setEditName('')} /> : null}
+      {editName ? <EditModal name={editName} onClose={() => setEditName('')} onSaved={load} /> : null}
       {showCreate ? <CreateSkillModal onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); load() }} /> : null}
     </div>
   )
 }
 
-// ── SkillSkill 设置卡片（只有开关） ────────────────────
+// ── VerySkill 设置卡片（只有开关） ────────────────────
 function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boolean) => void }) {
   const [open, setOpen] = React.useState(false)
   const [enabled, setEnabled] = React.useState(false)
@@ -935,7 +1434,7 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
 
   const handleUninstall = () => {
     if (uninstalling) return
-    if (!window.confirm('确定卸载 SkillSkill 插件吗？\n\n将从 DSH 中移除插件本体和全部配置。')) return
+    if (!window.confirm('确定卸载 VerySkill 插件吗？\n\n将从 DSH 中移除插件本体和全部配置。')) return
     setUninstalling(true); setFeedback(null)
     api('/uninstall').then((r) => {
       if (r?.ok) setFeedback('已卸载。请重启 DSH 使生效（插件配置文件中已移除）。')
@@ -973,7 +1472,7 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
           <span className="dsh-mm-name-row">
             <span className="dsh-mm-title" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
               <span style={{ display: 'inline-flex', color: 'var(--dsw-alias-brand-primary, #7c6cf0)', flexShrink: 0 }}><SkillIcon /></span>
-              SkillSkill
+              VerySkill
             </span>
             {version ? <span className="dsh-mm-version-badge">{version}</span> : null}
           </span>
@@ -1022,13 +1521,13 @@ function SkillManagerCard({ onEnabledChange }: { onEnabledChange?: (enabled: boo
             </p>
           ) : null}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
-            <span style={{ fontSize: 14, color: 'var(--dsw-alias-label-primary)' }}>启用技能管理</span>
+            <span style={{ fontSize: 14, color: 'var(--dsw-alias-label-primary)' }}>启用超级技能</span>
             {loading ? (
               <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>加载中…</span>
             ) : (
               <button type="button" onClick={toggleEnabled}
-                style={{ width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer', position: 'relative', background: enabled ? '#22c55e' : 'var(--dsw-alias-bg-layer-1)', transition: 'background .2s' }}
-                aria-label="启用技能管理"
+                style={{ width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer', position: 'relative', background: enabled ? 'var(--dsw-alias-state-success-primary, #22c55e)' : 'var(--dsw-alias-bg-layer-1)', transition: 'background .2s' }}
+                aria-label="启用超级技能"
               >
                 <span style={{ position: 'absolute', top: 3, width: 18, height: 18, borderRadius: '50%', background: '#fff', left: enabled ? 23 : 3, transition: 'left .2s' }} />
               </button>
@@ -1060,7 +1559,7 @@ let sectionDisposer: (() => void) | null = null
 // 全局：让 TS 认识 window 上的自定义字段
 declare global {
   interface Window {
-    __skillskillPendingCreate?: { t: number }
+    __veryskillPendingCreate?: { t: number }
   }
 }
 
@@ -1079,13 +1578,195 @@ function parseCreatePrompt(text: string): { name: string; description: string; c
   return { name, description: desc, content }
 }
 
+// ── 输入框工具行图标：超级技能分类菜单（hover 分类展开技能）+ 全局快捷键 ──
+function SkillQuickLauncher(_props: any) {
+  const [open, setOpen] = React.useState(false)
+  const [skills, setSkills] = React.useState<Skill[]>([])
+  const [activeCat, setActiveCat] = React.useState('')
+  const [menuPos, setMenuPos] = React.useState<{ x: number; y: number } | null>(null)
+  const [subPos, setSubPos] = React.useState<{ x: number; y: number } | null>(null)
+  const rootRef = React.useRef<HTMLDivElement>(null)
+  const menuRef = React.useRef<HTMLDivElement>(null)
+
+  React.useEffect(() => {
+    let alive = true
+    const load = () => loadSkills().then((s) => { if (alive) setSkills(s) })
+    load()
+    const iv = setInterval(load, 8000)
+    return () => { alive = false; clearInterval(iv) }
+  }, [])
+
+  // 点击外部关闭菜单（root 按钮 或 弹出菜单 内部都不算外部）
+  React.useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (rootRef.current?.contains(t)) return
+      if (menuRef.current?.contains(t)) return
+      setOpen(false); setActiveCat(''); setSubPos(null)
+    }
+    window.addEventListener('mousedown', close)
+    return () => window.removeEventListener('mousedown', close)
+  }, [open])
+
+  // 全局快捷键：按某个技能设定的快捷键 → 把技能名+空格装进输入框
+  React.useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.isComposing) return
+      const combo = shortcutFromEvent(e)
+      if (!combo) return
+      const target = skills.find(s => s.shortcut && normalizeShortcut(s.shortcut) === combo && s.enabled)
+      if (!target) return
+      e.preventDefault(); e.stopPropagation()
+      injectIntoInput(target.name + ' ')
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [skills])
+
+  // 按分类分组（未分类归入「其他」）
+  const groups = React.useMemo(() => {
+    const map = new Map<string, Skill[]>()
+    for (const s of skills) {
+      if (!s.enabled) continue
+      const cat = (s.category || '').trim() || '未分类'
+      if (!map.has(cat)) map.set(cat, [])
+      map.get(cat)!.push(s)
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  }, [skills])
+
+  const pickSkill = (s: Skill) => {
+    injectIntoInput(s.name + ' ')
+    setOpen(false); setActiveCat(''); setSubPos(null)
+  }
+
+  // 打开菜单：按钮位置用 getBoundingClientRect 锚定，菜单 fixed 渲染到 body
+  const toggle = () => {
+    if (open) { setOpen(false); return }
+    const r = rootRef.current?.getBoundingClientRect()
+    if (!r) return
+    // 记录按钮顶部位置：菜单从按钮向上弹出（输入框在页面底部，向下会被挡住）
+    setMenuPos({ x: r.left, y: r.top })
+    setOpen(true); setActiveCat(''); setSubPos(null)
+  }
+
+  // hover 分类：定位二级菜单到分类行右侧
+  const hoverCat = (cat: string, e: React.MouseEvent<HTMLDivElement>) => {
+    setActiveCat(cat)
+    const rr = e.currentTarget.getBoundingClientRect()
+    setSubPos({ x: rr.right - 2, y: rr.top - 4 })
+  }
+
+  const rowStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', width: '100%',
+    background: 'transparent', border: 'none', color: 'var(--dsw-alias-label-primary)', fontSize: 13,
+    cursor: 'pointer', whiteSpace: 'nowrap', textAlign: 'left',
+  }
+
+  const activeGroup = activeCat ? groups.find(([cat]) => cat === activeCat) : undefined
+
+  // 一级菜单内容
+  const menuEl = (
+    <div ref={menuRef} style={{
+      position: 'fixed', left: menuPos?.x ?? 0, bottom: window.innerHeight - (menuPos?.y ?? 0) + 6,
+      zIndex: 2147483001, width: 150,
+      background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l2)',
+      borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.35)', padding: 4,
+    }}>
+      {groups.length === 0 ? (
+        <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>暂无已启用的技能</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          {groups.map(([cat, list]) => (
+            <div key={cat}
+              onMouseEnter={(e) => hoverCat(cat, e)}>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6,
+                padding: '5px 8px', borderRadius: 6, fontSize: 12, cursor: 'default',
+                color: 'var(--dsw-alias-label-secondary)',
+                background: activeCat === cat ? 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 12%, transparent)' : 'transparent',
+              }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cat}</span>
+                <span style={{ fontSize: 10, color: 'var(--dsw-alias-label-tertiary)' }}>{list.length} ›</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
+  // 二级菜单内容（hover 分类时出现）
+  const subEl = (activeCat && activeGroup && subPos) ? (
+    <div style={{
+      position: 'fixed', left: subPos.x, top: subPos.y, zIndex: 2147483002, width: 150,
+      background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l2)',
+      borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.35)', padding: 4,
+    }}>
+      {activeGroup[1].map(s => (
+        <button key={s.name} type="button" onClick={() => pickSkill(s)} style={rowStyle}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 12%, transparent)'; e.currentTarget.style.color = 'var(--dsw-alias-brand-primary, #b6aaff)' }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--dsw-alias-label-primary)' }}>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</span>
+          {s.shortcut ? (
+            <kbd style={{
+              fontSize: 10, padding: '1px 5px', borderRadius: 4,
+              border: '1px solid var(--dsw-alias-border-l1)', color: 'var(--dsw-alias-label-tertiary)',
+              fontFamily: 'var(--dsw-font-mono, Menlo, monospace)',
+            }}>{s.shortcut}</kbd>
+          ) : null}
+        </button>
+      ))}
+    </div>
+  ) : null
+
+  return (
+    <div ref={rootRef} style={{ display: 'inline-flex', alignItems: 'center' }}>
+      <button type="button" onClick={toggle} title="超级技能（按分类选择，可设快捷键）"
+        aria-expanded={open}
+        style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 26, height: 26, borderRadius: 8, border: '1px solid var(--dsw-alias-border-l2)',
+          background: open ? 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 18%, transparent)' : 'transparent',
+          color: open ? 'var(--dsw-alias-brand-primary, #b6aaff)' : 'var(--dsw-alias-label-secondary)',
+          cursor: 'pointer', transition: 'background .12s, color .12s, border-color .12s',
+          padding: 0,
+        }}
+        onMouseEnter={(e) => { if (!open) { e.currentTarget.style.background = 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 12%, transparent)'; e.currentTarget.style.color = 'var(--dsw-alias-brand-primary, #b6aaff)' } }}
+        onMouseLeave={(e) => { if (!open) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--dsw-alias-label-secondary)' } }}
+      >
+        <SkillIcon size={14} />
+      </button>
+
+      {open && menuPos ? <React.Fragment>{menuEl}{subEl}</React.Fragment> : null}
+    </div>
+  )
+}
+
+// 从键盘事件提取标准化快捷键字符串（如 Ctrl+Shift+1）
+function shortcutFromEvent(e: KeyboardEvent): string {
+  if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return ''
+  const parts: string[] = []
+  if (e.ctrlKey) parts.push('Ctrl')
+  if (e.altKey) parts.push('Alt')
+  if (e.shiftKey) parts.push('Shift')
+  if (e.metaKey) parts.push('Meta')
+  const key = e.key.length === 1 ? e.key.toUpperCase() : e.key
+  parts.push(key)
+  return parts.join('+')
+}
+function normalizeShortcut(s: string): string {
+  return s.trim().replace(/\s+/g, '').replace(/\+/g, '+')
+}
+
 export function apply(ctx: any) {
   const slots = ctx.slots as any
   const register = slots.register.bind(slots) as (opts: object, comp: unknown) => () => void
 
   // ── 注入统一卡片 CSS（与 makemake/passpass/veryIM 共用 dsh-mm-* 类） ──
-  if (!document.getElementById('dsh-mm-css-skillskill')) {
-    const s = document.createElement('style'); s.id = 'dsh-mm-css-skillskill'
+  if (!document.getElementById('dsh-mm-css-veryskill')) {
+    const s = document.createElement('style'); s.id = 'dsh-mm-css-veryskill'
     s.textContent = `
 .dsh-mm-card{list-style:none;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3,#fff);transition:border-color .16s,background .16s;overflow:hidden}
 .dsh-mm-card:hover{border-color:var(--dsw-alias-label-dimmed,#9ca3af)}
@@ -1104,6 +1785,8 @@ export function apply(ctx: any) {
 .dsh-mm-btn-env{font-size:12px;line-height:18px}
 .dsh-mm-chevron{color:var(--dsw-alias-label-tertiary);transition:transform .14s ease-in-out}
 .dsh-mm-body{padding:12px 14px;border-top:1px solid var(--dsw-alias-border-l2)}
+@keyframes dsh-sk-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+.dsh-sk-spin{display:inline-block;animation:dsh-sk-spin .8s linear infinite}
 `
     document.head.appendChild(s)
   }
@@ -1129,7 +1812,7 @@ export function apply(ctx: any) {
 
     // 2) 创建 + 反馈
     const handleCreateSkill = (parsed: { name: string; description: string; content: string }, ta: HTMLTextAreaElement) => {
-      window.__skillskillPendingCreate = { t: Date.now() }
+      window.__veryskillPendingCreate = { t: Date.now() }
       const orig = ta.value
       // 输入框临时显示处理中
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set
@@ -1161,7 +1844,7 @@ export function apply(ctx: any) {
         } catch { /* ignore */ }
         // 清空输入框 + 往对话发反馈消息（服务端调 session.prompt）
         setVal('')
-        const feedbackText = `✅ 技能「${parsed.name}」已创建并规范化。${fieldCount > 0 ? `已自动识别 ${fieldCount} 个可复用设置项（可在 设置 → 技能管理 → 该技能 → 设置 中填写）。` : '未检测到明显设置项，可直接使用。'}可用 list_skills 查看。`
+        const feedbackText = `✅ 技能「${parsed.name}」已创建并规范化。${fieldCount > 0 ? `已自动识别 ${fieldCount} 个可复用设置项（可在 设置 → 超级技能 → 该技能 → 设置 中填写）。` : '未检测到明显设置项，可直接使用。'}后续可在 设置 → 超级技能 中继续收尾：编辑内容、启用/禁用、关联配套插件。若技能需要配套插件，请把插件做成永久插件（安装进 profile），不要用动态插件（重启即失效）。可用 list_skills 查看。`
         void api('/feedback', { text: feedbackText })
       })
     }
@@ -1181,9 +1864,9 @@ export function apply(ctx: any) {
     if (visible && !sectionDisposer) {
       sectionDisposer = ctx.slots.inject('settings.section', () => register({
         name: 'settings.section',
-        id: 'skillskill-section',
+        id: 'veryskill-section',
         order: 30,
-        label: () => '技能管理',
+        label: () => '超级技能',
       }, function SkillManagerSectionEntry() {
         return React.createElement(SkillManagerSection, { ctx })
       }))
@@ -1197,11 +1880,19 @@ export function apply(ctx: any) {
 
   ctx.slots.inject('settings.plugin.item', () => register({
     name: 'settings.plugin.item',
-    key: 'skillskill',
+    key: 'veryskill',
     priority: 30,
   }, function SkillManagerPluginCard(props: any) {
     return React.createElement(SkillManagerCard, { ...props, onEnabledChange: ensureSection })
   }))
+
+  // 输入框工具行图标：超级技能分类菜单 + 快捷键
+  ctx.slots.inject('conversation.input.left' as any, () => register({
+    name: 'conversation.input.left',
+    id: 'dsh-veryskill-launcher',
+    order: 80,
+    label: () => '超级技能',
+  } as any, (props: any) => React.createElement(SkillQuickLauncher, { ...props })))
 }
 
 export const inject = ['slots']

@@ -1,16 +1,16 @@
 /**
- * dsh-skillskill — 技能管理插件（服务端）
+ * dsh-veryskill — 超级技能插件（服务端）
  *
  * 技能 = profile node_modules 下的 dsh-* 插件目录（含 symlink）。
  * 启用/禁用 = 增删 profile package.json 的 dsh.profile.bundles 条目（隔离/恢复加载）。
  * 删除 = 移除 bundles 条目 + 删除 node_modules 里的目录/symlink（symlink 只删链接，保留源）。
  * 本插件自身不出现在技能列表（避免自禁用导致无法恢复）。
  */
-import { readFileSync, writeFileSync, existsSync, rmSync, renameSync, readdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, rmSync, renameSync, readdirSync, statSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
 import * as path from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 export const inject = ['tools', 'settings', 'systemPrompt', 'webServer']
@@ -21,8 +21,8 @@ const NM_DIR = path.join(PROFILE_DIR, 'node_modules')
 const PKG_PATH = path.join(PROFILE_DIR, 'package.json')
 const STATE_PATH = path.join(dshHome, '.skillskill.json')
 const SKILLS_DIR = path.join(dshHome, 'skills')
-const SELF = 'dsh-skillskill'
-const GITHUB_RAW = 'https://ghfast.top/https://raw.githubusercontent.com/ideasir/dsh-skillskill/main/package.json'
+const SELF = 'dsh-veryskill'
+const GITHUB_RAW = 'https://ghfast.top/https://raw.githubusercontent.com/ideasir/dsh-veryskill/main/package.json'
 const SETTINGS_FILE = '.skillskill.json'   // 存在技能目录里（设置存技能目录内）
 
 interface Skill {
@@ -33,10 +33,24 @@ interface Skill {
   enabled: boolean      // 是否被禁用（.disabled 后缀）
   userCreated: boolean  // 是否用户主动创建（frontmatter x-user-created: true）
   settingsEnabled: boolean  // 是否开启技能设置
+  category?: string     // 技能分类（如：创作、工具、效率）
+  shortcut?: string     // 快捷键（如 Ctrl+Shift+1）
+  plugins: SkillPluginRef[]  // 关联的动态插件（归属/审计）
+}
+
+interface SkillPluginRef {
+  id: string            // 动态插件 pluginId（如 agvid-1）
+  name: string          // 插件显示名（如 Agnes video renderer）
+  packageId?: string    // 最近关联的 Package（可选）
+  attachedAt: string    // 归属时间
+  lastSeenAt?: string   // 最近一次运行的时间戳（可选）
 }
 
 interface SkillSettings {
   enabled: boolean       // 是否开启技能设置
+  category?: string      // 技能分类（如：创作、工具、效率）
+  shortcut?: string      // 快捷键（如 Ctrl+Shift+1，用于快速把技能名装进输入框）
+  plugins: SkillPluginRef[]  // 关联的动态插件归属（自动记录）
   fields: Array<{
     key: string          // 设置项标识
     label: string        // 显示名
@@ -111,6 +125,9 @@ async function scanSkills(): Promise<{ skills: Skill[]; total: number; unmanaged
         enabled,
         userCreated: isUser,
         settingsEnabled: settings?.enabled ?? false,
+        category: settings?.category,
+        shortcut: settings?.shortcut,
+        plugins: settings?.plugins ?? [],
         isUser,
       })
     } catch { /* 跳过无法读取的 */ }
@@ -129,7 +146,19 @@ function readSkillSettings(skillPath: string): SkillSettings | null {
     const p = path.join(skillPath, SETTINGS_FILE)
     if (!existsSync(p)) return null
     const raw = JSON.parse(readFileSync(p, 'utf-8'))
-    return { enabled: !!raw.enabled, fields: Array.isArray(raw.fields) ? raw.fields : [] }
+    return {
+      enabled: !!raw.enabled,
+      category: raw.category ? String(raw.category) : undefined,
+      shortcut: raw.shortcut ? String(raw.shortcut) : undefined,
+      plugins: Array.isArray(raw.plugins) ? raw.plugins.map((p: any) => ({
+        id: String(p?.id ?? ''),
+        name: String(p?.name ?? p?.id ?? ''),
+        packageId: p?.packageId ? String(p.packageId) : undefined,
+        attachedAt: String(p?.attachedAt ?? ''),
+        lastSeenAt: p?.lastSeenAt ? String(p.lastSeenAt) : undefined,
+      })).filter((p: SkillPluginRef) => !!p.id) : [],
+      fields: Array.isArray(raw.fields) ? raw.fields : [],
+    }
   } catch { return null }
 }
 
@@ -141,8 +170,33 @@ function writeSkillSettings(skillPath: string, settings: SkillSettings): { ok: b
   } catch (e: any) { return { ok: false, error: e?.message } }
 }
 
+/** 把动态插件归属到某个技能：读写该技能本地 .skillskill.json 的 plugins 数组 */
+function attachPluginToSkill(skillPath: string, plugin: { id: string; name?: string; packageId?: string }): { ok: boolean; error?: string } {
+  try {
+    const existing = readSkillSettings(skillPath) ?? { enabled: false, plugins: [], fields: [] }
+    const plugins = existing.plugins.filter(p => p.id !== plugin.id)
+    plugins.unshift({
+      id: plugin.id,
+      name: plugin.name || plugin.id,
+      packageId: plugin.packageId || undefined,
+      attachedAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    })
+    return writeSkillSettings(skillPath, { ...existing, plugins })
+  } catch (e: any) { return { ok: false, error: e?.message } }
+}
+
+/** 从技能本地文件移除某个动态插件的归属 */
+function detachPluginFromSkill(skillPath: string, pluginId: string): { ok: boolean; error?: string } {
+  try {
+    const existing = readSkillSettings(skillPath) ?? { enabled: false, plugins: [], fields: [] }
+    const plugins = existing.plugins.filter(p => p.id !== pluginId)
+    return writeSkillSettings(skillPath, { ...existing, plugins })
+  } catch (e: any) { return { ok: false, error: e?.message } }
+}
+
 /** 创建技能：目录技能 + SKILL.md，自动打 x-user-created 标记 */
-async function createSkill(name: string, description: string, content: string): Promise<{ ok: boolean; error?: string; path?: string }> {
+async function createSkill(name: string, description: string, content: string): Promise<{ ok: boolean; error?: string; path?: string; name?: string }> {
   const clean = name.trim().replace(/[^\w\u4e00-\u9fa5-]+/g, '-').toLowerCase() || 'unnamed-skill'
   const dir = path.join(SKILLS_DIR, clean)
   if (existsSync(dir)) return { ok: false, error: `技能「${clean}」已存在` }
@@ -151,7 +205,40 @@ async function createSkill(name: string, description: string, content: string): 
     const body = content.trim() || `# ${clean}\n\n技能内容。`
     const md = `---\nname: ${clean}\ndescription: ${description || '用户创建的技能'}\nx-user-created: true\n---\n\n${body}\n`
     writeFileSync(path.join(dir, 'SKILL.md'), md, 'utf-8')
-    return { ok: true, path: dir }
+    return { ok: true, path: dir, name: clean }
+  } catch (e: any) { return { ok: false, error: e?.message } }
+}
+
+/** 把设置/正文保存回 SKILL.md：保留 frontmatter 其它键（name/x-user-created/禁用标记），只更新 description 与正文 */
+function saveSkillContent(skillName: string, opts: { description?: string; body: string }): { ok: boolean; error?: string } {
+  try {
+    const found = findSkillPath(skillName)
+    if (!found) return { ok: false, error: '技能不存在' }
+    const md = skillMarkdownPath(found.path)
+    if (!md) return { ok: false, error: '未找到 SKILL.md' }
+    const text = readFileSync(md, 'utf-8')
+    const fm = splitFrontmatter(text)
+    if (!fm) return { ok: false, error: 'frontmatter 格式异常，无法安全保存' }
+    const headLines = fm.head.split('\n')
+    const kept: string[] = []
+    let sawDescription = false
+    for (const line of headLines) {
+      if (/^description\s*:/i.test(line)) {
+        sawDescription = true
+        kept.push(opts.description !== undefined && opts.description !== null
+          ? `description: ${JSON.stringify(String(opts.description))}`
+          : line)
+      } else {
+        kept.push(line)
+      }
+    }
+    if ((opts.description !== undefined && opts.description !== null) && !sawDescription) {
+      kept.push(`description: ${JSON.stringify(String(opts.description))}`)
+    }
+    const rebuilt = '---\n' + kept.join('\n') + '\n---\n\n' + String(opts.body ?? '').trim() + '\n'
+    if (rebuilt === text) return { ok: true }
+    writeFileSync(md, rebuilt, 'utf-8')
+    return { ok: true }
   } catch (e: any) { return { ok: false, error: e?.message } }
 }
 
@@ -170,10 +257,9 @@ function detectSettingsCandidates(skillPath: string): Array<{ key: string; label
       const text = readFileSync(f, 'utf-8').slice(0, 20000)
       // URL
       const urls = text.match(/https?:\/\/[^\s"'`)\]]+/g) || []
-      for (const u0 of [...new Set(urls)].slice(0, 3)) {
-        const u = String(u0)
-        out.push({ key: 'api_base_url', label: 'API 地址', reason: `检测到接口地址「${u.slice(0, 40)}…」，每次调用都要用到，建议设为可配置项`, });
-        break
+      const firstUrl = urls.length ? String([...new Set(urls)][0]) : ''
+      if (firstUrl) {
+        out.push({ key: 'api_base_url', label: 'API 地址', reason: `检测到接口地址「${firstUrl.slice(0, 40)}…」，每次调用都要用到，建议设为可配置项`, });
       }
       // 密钥 token
       const keyMatches = text.match(/(?:api[_-]?key|token|secret|password|密钥|apikey)\s*[:=]\s*['"]?([A-Za-z0-9_\-\.]{8,})/gi) || []
@@ -214,6 +300,48 @@ function parseFrontmatter(text: string): { name?: string; description?: string; 
   return out
 }
 
+/** 拆分 frontmatter 的头（key: value 行）和正文（body） */
+function splitFrontmatter(text: string): { head: string; rest: string } | null {
+  const first = text.indexOf('\n')
+  if (first < 0) return null
+  if (text.slice(0, first).trim() !== '---') return null
+  const close = text.indexOf('\n---', first + 1)
+  if (close < 0) return null
+  const head = text.slice(first + 1, close).trim()
+  const rest = text.slice(close + 4)  // skip "\n---"
+  return { head, rest }
+}
+
+/** 在 SKILL.md / 扁平 .md 的 frontmatter 写入/清除原生禁用标记（disable-model-invocation / user-invocable） */
+function applyInvocationFlags(md: string, disable: boolean): boolean {
+  const text = readFileSync(md, 'utf-8')
+  const fm = splitFrontmatter(text)
+  if (!fm) return false
+  const drop = /^\s*(disable-model-invocation|user-invocable)\s*:\s*.*$/gm
+  let head = fm.head.replace(drop, '').replace(/^\s*\n/gm, '').trim()
+  if (disable) {
+    head = (head ? head + '\n' : '') + 'disable-model-invocation: true\nuser-invocable: false'
+  }
+  const rebuilt = '---\n' + head + '\n---' + fm.rest
+  if (rebuilt === text) return true
+  writeFileSync(md, rebuilt, 'utf-8')
+  return true
+}
+
+/** 解析技能路径指向的 md 文件（目录技能取 SKILL.md，扁平技能取自身） */
+function skillMarkdownPath(skillPath: string): string | null {
+  try {
+    const st = statSync(skillPath, { throwIfNoEntry: false })
+    if (!st) return null
+    if (st.isDirectory()) {
+      const md = path.join(skillPath, 'SKILL.md')
+      return existsSync(md) ? md : null
+    }
+    if (st.isFile()) return skillPath
+  } catch { /* ignore */ }
+  return null
+}
+
 function getLocalVersion(): string {
   try {
     return JSON.parse(readFileSync(path.join(NM_DIR, SELF, 'package.json'), 'utf-8')).version ?? 'unknown'
@@ -238,12 +366,15 @@ function findSkillPath(name: string): { path: string; disabled: boolean } | null
   return null
 }
 
-/** 禁用：目录/文件加 .disabled 后缀（DSH 扫描不到 = 隔离） */
+/** 禁用：写入 frontmatter 禁用标记（原生机制，让 DSH 无感知），再加 .disabled 后缀 */
 function disableSkill(name: string): { ok: boolean; error?: string } {
   try {
     const found = findSkillPath(name)
     if (!found) return { ok: false, error: '技能不存在' }
-    if (found.disabled) return { ok: true }   // 已禁用
+    // 写入 frontmatter 禁用标记（原生机制：DSH 从此不感知此技能）
+    const md = skillMarkdownPath(found.path)
+    if (md) applyInvocationFlags(md, true)
+    if (found.disabled) return { ok: true }
     const disabledPath = found.path + '.disabled'
     if (existsSync(disabledPath)) rmSync(disabledPath, { recursive: true, force: true })
     renameSync(found.path, disabledPath)
@@ -251,12 +382,15 @@ function disableSkill(name: string): { ok: boolean; error?: string } {
   } catch (e: any) { return { ok: false, error: e?.message } }
 }
 
-/** 启用：去掉 .disabled 后缀（DSH 恢复扫描） */
+/** 启用：清除 frontmatter 禁用标记，再去掉 .disabled 后缀 */
 function enableSkill(name: string): { ok: boolean; error?: string } {
   try {
     const found = findSkillPath(name)
     if (!found) return { ok: false, error: '技能不存在' }
-    if (!found.disabled) return { ok: true }   // 已启用
+    // 清除 frontmatter 禁用标记（原生机制：恢复 DSH 感知）
+    const md = skillMarkdownPath(found.path)
+    if (md) applyInvocationFlags(md, false)
+    if (!found.disabled) return { ok: true }
     const disabledPath = found.path
     const enabledPath = disabledPath.replace(/\.disabled$/, '')
     if (existsSync(enabledPath)) rmSync(enabledPath, { recursive: true, force: true })
@@ -275,7 +409,7 @@ function deleteSkill(name: string): { ok: boolean; error?: string } {
   } catch (e: any) { return { ok: false, error: e?.message } }
 }
 
-/** 读技能内容：SKILL.md 全文 + 目录文件列表 */
+/** 读技能内容：SKILL.md 全文 + frontmatter 拆分（body/meta）+ 目录文件列表 */
 async function readSkillContent(name: string): Promise<any> {
   try {
     const found = findSkillPath(name)
@@ -283,12 +417,17 @@ async function readSkillContent(name: string): Promise<any> {
     const isDir = (await import('node:fs')).statSync(found.path).isDirectory()
     const skillMd = isDir ? path.join(found.path, 'SKILL.md') : found.path
     let content = ''
-    if (existsSync(skillMd)) content = (await readFile(skillMd, 'utf-8')).slice(0, 40000)
+    if (existsSync(skillMd)) content = (await readFile(skillMd, 'utf-8')).slice(0, 400000)
+    const fm = splitFrontmatter(content)
+    const front = fm ? parseFrontmatter(content) : null
     return {
       ok: true,
       name,
       kind: isDir ? 'directory' : 'flat',
       content,
+      // 编辑用：剥离 frontmatter 的正文 + 元信息
+      body: fm ? fm.rest.trim() : content,
+      meta: { name: front?.name ?? name, description: front?.description ?? '' },
       path: skillMd,
       files: isDir ? (await readdir(found.path)).slice(0, 50) : [],
     }
@@ -298,9 +437,9 @@ async function readSkillContent(name: string): Promise<any> {
 }
 
 export function apply(ctx: any, config: any = {}) {
-  const scope = ctx.settings.register(settingsNamespace('skillskill'), Schema.object({
+  const scope = ctx.settings.register('veryskill', Schema.object({
     enabled: Schema.boolean().default(false)
-      .description('启用技能管理：开启后设置页出现「技能管理」菜单，模型可通过工具查看技能'),
+      .description('启用超级技能：开启后设置页出现「超级技能」菜单，模型可通过工具查看技能'),
   }).description('管理 DSH 中已安装的技能插件'), { base: config })
 
   let enabledCache = false
@@ -326,7 +465,7 @@ export function apply(ctx: any, config: any = {}) {
   ctx.effect(() => {
     // 技能列表 + 开关状态 + 版本
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/list',
+      kind: 'exact', path: '/plugins/dsh-veryskill/list',
       handler: async (_req: IncomingMessage, res: ServerResponse) => {
         try {
           const { skills, total, unmanaged } = await scanSkills()
@@ -337,14 +476,14 @@ export function apply(ctx: any, config: any = {}) {
 
     // 保存开关
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/save',
+      kind: 'exact', path: '/plugins/dsh-veryskill/save',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
           if (typeof body.enabled === 'boolean') {
             setToolsEnabled(body.enabled)
             const svc = ctx.get?.('settings') ?? ctx.settings
-            if (svc?.update) await svc.update(settingsNamespace('skillskill'), { enabled: body.enabled })
+            if (svc?.update) await svc.update('veryskill', { enabled: body.enabled })
             else scope.update({ enabled: body.enabled })
             enabledCache = body.enabled
           }
@@ -353,23 +492,41 @@ export function apply(ctx: any, config: any = {}) {
       },
     })
 
-    // 启用/禁用技能
+    // 启用/禁用技能（级联：同步开关关联插件的 enabled）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/toggle',
+      kind: 'exact', path: '/plugins/dsh-veryskill/toggle',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
           const name = String(body.name ?? '')
           if (!name || name === SELF) return json(res, { ok: false, error: '无效的技能名' })
           const r = body.enabled ? enableSkill(name) : disableSkill(name)
-          json(res, { ...r, restart: true })
+          // 级联：把关联插件的 settings enabled 同步为同一状态（插件需注册同名 namespace 才生效）
+          const cascade: Array<{ id: string; ok: boolean; error?: string }> = []
+          const found = findSkillPath(name)
+          if (found) {
+            const settings = readSkillSettings(found.path)
+            const svc = ctx.get?.('settings') ?? ctx.settings
+            for (const p of settings?.plugins ?? []) {
+              // namespace 推导：packageId 形如 dsh-agimg → agimg；否则退回插件 id
+              const raw = (p.packageId && !p.packageId.includes('/')) ? p.packageId : p.id
+              const ns = raw.replace(/^dsh-/, '')
+              try {
+                await svc.update(ns, { enabled: !!body.enabled })
+                cascade.push({ id: p.id, ok: true })
+              } catch (e: any) {
+                cascade.push({ id: p.id, ok: false, error: e?.message })
+              }
+            }
+          }
+          json(res, { ...r, restart: true, cascade })
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
       },
     })
 
     // 创建技能（自动打 x-user-created 标记）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/create',
+      kind: 'exact', path: '/plugins/dsh-veryskill/create',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
@@ -383,7 +540,7 @@ export function apply(ctx: any, config: any = {}) {
 
     // 扫描技能内容，识别哪些内容适合做设置（带理由）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/setup-scan',
+      kind: 'exact', path: '/plugins/dsh-veryskill/setup-scan',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
@@ -398,7 +555,7 @@ export function apply(ctx: any, config: any = {}) {
 
     // 保存技能设置（存技能目录 .skillskill.json）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/setup-save',
+      kind: 'exact', path: '/plugins/dsh-veryskill/setup-save',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
@@ -407,6 +564,10 @@ export function apply(ctx: any, config: any = {}) {
           if (!found) return json(res, { ok: false, error: '技能不存在' })
           const settings: SkillSettings = {
             enabled: !!body.enabled,
+            category: body.category ? String(body.category).trim() : undefined,
+            shortcut: body.shortcut ? String(body.shortcut).trim() : undefined,
+            // 保留已有插件归属，避免 setup-save 覆盖丢失
+            plugins: (readSkillSettings(found.path)?.plugins ?? []),
             fields: Array.isArray(body.fields) ? body.fields.map((f: any) => ({
               key: String(f.key ?? ''), label: String(f.label ?? f.key ?? ''),
               value: String(f.value ?? ''), isSecret: !!f.isSecret, reason: String(f.reason ?? ''),
@@ -417,9 +578,63 @@ export function apply(ctx: any, config: any = {}) {
       },
     })
 
+    // 单独保存快捷键（不覆盖其他设置）
+    ctx.webServer.register({
+      kind: 'exact', path: '/plugins/dsh-veryskill/shortcut-save',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        try {
+          const body = await readBody(req)
+          const name = String(body.name ?? '')
+          if (!name) return json(res, { ok: false, error: '技能名不能为空' })
+          const found = findSkillPath(name)
+          if (!found) return json(res, { ok: false, error: '技能不存在' })
+          const existing = readSkillSettings(found.path) ?? { enabled: false, plugins: [], fields: [] }
+          const shortcut = body.shortcut ? String(body.shortcut).trim() : undefined
+          json(res, writeSkillSettings(found.path, { ...existing, shortcut }))
+        } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
+      },
+    })
+
+    // 自动归属：把动态插件记录进技能本地文件（创建插件后由外部/会话调用）
+    ctx.webServer.register({
+      kind: 'exact', path: '/plugins/dsh-veryskill/plugin-attach',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        try {
+          const body = await readBody(req)
+          const name = String(body.skill ?? '')
+          const pluginId = String(body.pluginId ?? '')
+          if (!name || !pluginId) return json(res, { ok: false, error: '需要 skill 与 pluginId' })
+          const found = findSkillPath(name)
+          if (!found) return json(res, { ok: false, error: '技能不存在' })
+          const r = attachPluginToSkill(found.path, {
+            id: pluginId,
+            name: body.name ? String(body.name) : undefined,
+            packageId: body.packageId ? String(body.packageId) : undefined,
+          })
+          json(res, r)
+        } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
+      },
+    })
+
+    // 解除归属：从技能本地文件移除某个动态插件
+    ctx.webServer.register({
+      kind: 'exact', path: '/plugins/dsh-veryskill/plugin-detach',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        try {
+          const body = await readBody(req)
+          const name = String(body.skill ?? '')
+          const pluginId = String(body.pluginId ?? '')
+          if (!name || !pluginId) return json(res, { ok: false, error: '需要 skill 与 pluginId' })
+          const found = findSkillPath(name)
+          if (!found) return json(res, { ok: false, error: '技能不存在' })
+          json(res, detachPluginFromSkill(found.path, pluginId))
+        } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
+      },
+    })
+
     // 读技能设置
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/settings-get',
+      kind: 'exact', path: '/plugins/dsh-veryskill/settings-get',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const url = new URL(req.url ?? '/', 'http://localhost')
@@ -433,7 +648,7 @@ export function apply(ctx: any, config: any = {}) {
 
     // 临时改 agent-presets.default（新建技能时切创造模式用）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/default-preset',
+      kind: 'exact', path: '/plugins/dsh-veryskill/default-preset',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
@@ -441,9 +656,9 @@ export function apply(ctx: any, config: any = {}) {
           if (!['standard', 'cordis', 'code', 'minimal'].includes(preset)) return json(res, { ok: false, error: '无效预设' })
           const svc = ctx.get?.('settings') ?? ctx.settings
           if (svc?.mutate) {
-            await svc.mutate(settingsNamespace('agent-presets'), [{ op: 'set', path: ['default'], value: preset }])
+            await svc.mutate('agent-presets', [{ op: 'set', path: ['default'], value: preset }])
           } else if (svc?.update) {
-            await svc.update(settingsNamespace('agent-presets'), { default: preset })
+            await svc.update('agent-presets', { default: preset })
           }
           json(res, { ok: true, preset })
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
@@ -452,7 +667,7 @@ export function apply(ctx: any, config: any = {}) {
 
     // 反馈消息：往最新会话发一条系统消息（技能创建结果通知）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/feedback',
+      kind: 'exact', path: '/plugins/dsh-veryskill/feedback',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
@@ -489,7 +704,7 @@ export function apply(ctx: any, config: any = {}) {
 
     // 技能内容（编辑弹窗）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/content',
+      kind: 'exact', path: '/plugins/dsh-veryskill/content',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const url = new URL(req.url ?? '/', 'http://localhost')
@@ -500,9 +715,28 @@ export function apply(ctx: any, config: any = {}) {
       },
     })
 
+    // 保存技能内容（编辑弹窗：更新 description + 正文，保留 frontmatter 其它键）
+    // ⚠️ 路径不能与上方「保存开关」的 /save 重复——DSH webserver 对 exact 路由去重，
+    //    重复注册会导致整个 DSH 启动失败（duplicate exact route）。
+    ctx.webServer.register({
+      kind: 'exact', path: '/plugins/dsh-veryskill/save-content',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        try {
+          const body = await readBody(req)
+          const name = String(body.name ?? '')
+          if (!name || name === SELF) return json(res, { ok: false, error: '无效的技能名' })
+          const r = saveSkillContent(name, {
+            description: body.description !== undefined && body.description !== null ? String(body.description) : undefined,
+            body: String(body.body ?? ''),
+          })
+          json(res, r)
+        } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
+      },
+    })
+
     // 删除技能（需 confirm === 'yes'）
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/delete',
+      kind: 'exact', path: '/plugins/dsh-veryskill/delete',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         try {
           const body = await readBody(req)
@@ -514,9 +748,41 @@ export function apply(ctx: any, config: any = {}) {
       },
     })
 
+    // 插件信息（读 profile node_modules 里插件包的 package.json，供关联卡片展示介绍）
+    ctx.webServer.register({
+      kind: 'exact', path: '/plugins/dsh-veryskill/plugin-info',
+      handler: async (req: IncomingMessage, res: ServerResponse) => {
+        try {
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const id = url.searchParams.get('id') ?? ''
+          const packageId = url.searchParams.get('packageId') ?? ''
+          if (!id) return json(res, { ok: false, error: '缺少插件标识' })
+          // 按包名在 node_modules 里找 package.json：永久插件如 dsh-agimg 是 node_modules 目录；
+          // 动态插件 id（如 agimg-1）不在 node_modules，则 packageId 兜底或返回空描述
+          let pkg: any = null
+          for (const c of [...new Set([packageId, id]).values()]) {
+            if (!c) continue
+            try {
+              const p = path.join(NM_DIR, c, 'package.json')
+              if (existsSync(p)) { pkg = JSON.parse(readFileSync(p, 'utf-8')); break }
+            } catch { /* continue */ }
+          }
+          if (!pkg) return json(res, { ok: true, id, name: id, description: '', version: '', permanent: false })
+          json(res, {
+            ok: true,
+            id,
+            name: pkg.name ?? id,
+            description: pkg.description ?? '',
+            version: pkg.version ?? '',
+            permanent: true,
+          })
+        } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
+      },
+    })
+
     // 检查更新
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/update',
+      kind: 'exact', path: '/plugins/dsh-veryskill/update',
       handler: async (_req: IncomingMessage, res: ServerResponse) => {
         try {
           const localVersion = getLocalVersion()
@@ -535,7 +801,7 @@ export function apply(ctx: any, config: any = {}) {
 
     // 智能检测
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/env-check',
+      kind: 'exact', path: '/plugins/dsh-veryskill/env-check',
       handler: async (_req: IncomingMessage, res: ServerResponse) => {
         try {
           const { skills } = await scanSkills()
@@ -544,7 +810,7 @@ export function apply(ctx: any, config: any = {}) {
             { id: 'dir', label: '插件目录', ok: existsSync(NM_DIR), errorReason: existsSync(NM_DIR) ? '' : '未找到 profile 插件目录' },
             { id: 'scan', label: '技能发现', ok: skills.length > 0, errorReason: skills.length > 0 ? '' : '未发现已安装技能' },
             { id: 'bundles', label: '加载清单', ok: bundles.length > 0, errorReason: bundles.length > 0 ? '' : 'bundles 配置为空' },
-            { id: 'toggle', label: '技能管理开关', ok: getEnabled(), errorReason: getEnabled() ? '' : '技能管理当前为关闭状态' },
+            { id: 'toggle', label: '超级技能开关', ok: getEnabled(), errorReason: getEnabled() ? '' : '超级技能当前为关闭状态' },
           ]
           json(res, { ok: true, items, version: getLocalVersion() })
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
@@ -553,7 +819,7 @@ export function apply(ctx: any, config: any = {}) {
 
     // 卸载本插件
     ctx.webServer.register({
-      kind: 'exact', path: '/plugins/dsh-skillskill/uninstall',
+      kind: 'exact', path: '/plugins/dsh-veryskill/uninstall',
       handler: async (_req: IncomingMessage, res: ServerResponse) => {
         try {
           const pkg = readProfilePkg()
@@ -581,17 +847,16 @@ export function apply(ctx: any, config: any = {}) {
 
   const registerTools = () => {
     if (toolDisposers.length) return
-    toolDisposers.push(ctx.tools.register({
+    toolDisposers.push(ctx.tools.register(defineTool({
       name: 'list_skills',
-      description: '列出 DSH 中已安装的技能插件（名称、描述、版本、启用状态）。',
+      description: '列出 DSH 中已安装的技能插件（名称、描述、启用状态）。',
       parameters: {},
       output: {
         schema: { type: 'object', additionalProperties: false, properties: {
           skills: { type: 'array', items: {
             type: 'object', additionalProperties: false,
             properties: {
-              name: { type: 'string' }, description: { type: 'string' },
-              version: { type: 'string' }, enabled: { type: 'boolean' },
+              name: { type: 'string' }, description: { type: 'string' }, enabled: { type: 'boolean' },
             },
             required: ['name', 'description', 'enabled'],
           } },
@@ -603,13 +868,13 @@ export function apply(ctx: any, config: any = {}) {
         ] as never,
       },
       async execute() {
-        if (!getEnabled()) throw new Error('技能管理已关闭，请在设置页启用。')
+        if (!getEnabled()) throw new Error('超级技能已关闭，请在设置页启用。')
         const { skills } = await scanSkills()
         return { skills: skills.map(s => ({ name: s.name, description: s.description, enabled: s.enabled })) }
       },
-    }))
+    })))
 
-    toolDisposers.push(ctx.tools.register({
+    toolDisposers.push(ctx.tools.register(defineTool({
       name: 'get_skill',
       description: '获取指定技能插件的详细信息（来源路径、是否启用）。',
       parameters: { name: { type: 'string', description: '技能名称' } },
@@ -625,13 +890,13 @@ export function apply(ctx: any, config: any = {}) {
         ] as never,
       },
       async execute(args: { name: string }) {
-        if (!getEnabled()) throw new Error('技能管理已关闭，请在设置页启用。')
+        if (!getEnabled()) throw new Error('超级技能已关闭，请在设置页启用。')
         const { skills } = await scanSkills()
         const s = skills.find(x => x.name === args.name)
         if (!s) return { found: false }
         return { found: true, name: s.name, description: s.description, source: s.source, enabled: s.enabled }
       },
-    }))
+    })))
   }
 
   const setToolsEnabled = (enabled: boolean) => {
@@ -642,14 +907,17 @@ export function apply(ctx: any, config: any = {}) {
 
   // ─── 系统提示词 ──────────────────────────────────
   ctx.systemPrompt.section({
-    name: 'skillskill',
+    name: 'veryskill',
     order: 200,
     text: () => {
       if (!getEnabled()) return ''
       return [
-        '## 技能管理',
-        '已开启技能管理。可调用 list_skills 查看所有已安装技能插件（含启用状态），',
-        '调用 get_skill 获取单个技能的版本与来源详情。',
+        '## 超级技能',
+        '已开启超级技能。技能 = ~/.dsh/skills 下带 SKILL.md 的目录（用户创建的技能，frontmatter 带 x-user-created: true）。',
+        '可调用 list_skills 查看所有已创建技能（含启用状态），调用 get_skill 获取单个技能的详情。',
+        '创建/修改技能在 设置 → 超级技能 页面进行：新建技能、编辑内容、开启设置项、启用/禁用、关联配套插件。',
+        '若一个技能需要配套插件（如调用外部 API 渲染器），请把插件做成「永久插件」：把代码放到 /vol1/1000/DeepSeek/dsh-xxx 并安装进 profile（package.json dependencies + dsh.profile.bundles），这样重启后依然生效。',
+        '不要用「动态插件」（cordis 临时注册）作为技能的配套插件——动态插件在进程重启后会丢失，技能随之失效。',
       ].join('\n')
     },
   })
@@ -662,5 +930,9 @@ export function apply(ctx: any, config: any = {}) {
     } catch { /* ignore */ }
   }
   sync()
-  setInterval(sync, 5000)
+  // 用 ctx.effect 管理轮询，插件停用/卸载时自动清理（原 setInterval 无清理会泄漏）
+  ctx.effect(() => {
+    const timer = setInterval(sync, 5000)
+    return () => clearInterval(timer)
+  })
 }

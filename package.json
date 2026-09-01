@@ -1,7 +1,7 @@
 {
-  "name": "dsh-skillskill",
-  "version": "0829-0.1.1-rc.2",
-  "description": "\u6280\u80fd\u7ba1\u7406\uff08SkillSkill\uff09\u2014\u2014\u7ba1\u7406 DSH \u4e2d\u5df2\u5b89\u88c5\u7684\u6280\u80fd\u63d2\u4ef6",
+  "name": "dsh-veryskill",
+  "version": "0901-0.1.2-rc.2",
+  "description": "超级技能（VerySkill）——管理 DSH 中已安装的技能插件，支持新建/编辑/启停/删除/关联配套插件",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -43,7 +43,6 @@
     "build": "npm run build:server && npm run build:client"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^22.20.1",
     "tsdown": "^0.22.14",
