@@ -858,9 +858,8 @@ export function apply(ctx: any, config: any = {}) {
             properties: {
               name: { type: 'string' }, description: { type: 'string' }, enabled: { type: 'boolean' },
             },
-            required: ['name', 'description', 'enabled'],
           } },
-        }, required: ['skills'] },
+        } },
         render: (_a: any, v: any) => [
           { type: 'text', text: v.skills.length > 0
             ? v.skills.map((s: any) => `- ${s.name}（${s.enabled ? '启用' : '禁用'}）：${s.description}`).join('\n')
@@ -882,7 +881,7 @@ export function apply(ctx: any, config: any = {}) {
         schema: { type: 'object', additionalProperties: false, properties: {
           found: { type: 'boolean' }, name: { type: 'string' }, description: { type: 'string' },
           source: { type: 'string' }, enabled: { type: 'boolean' },
-        }, required: ['found'] },
+        } },
         render: (a: any, v: any) => [
           { type: 'text', text: v.found
             ? `「${v.name}」（${v.enabled ? '启用' : '禁用'}）：${v.description}\n来源：${v.source}`
