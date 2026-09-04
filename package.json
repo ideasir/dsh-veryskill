@@ -1,6 +1,6 @@
 {
   "name": "dsh-veryskill",
-  "version": "0901-0.1.2-alpha.3",
+  "version": "0904-0.1.2-alpha.3",
   "description": "超级技能（VerySkill）——管理 DSH 中已安装的技能插件，支持新建/编辑/启停/删除/关联配套插件",
   "type": "module",
   "main": "lib/index.js",

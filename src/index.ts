@@ -19,11 +19,11 @@ const dshHome = process.env.DSH_HOME ?? '/root/.dsh'
 const PROFILE_DIR = path.join(dshHome, 'profiles', 'web')
 const NM_DIR = path.join(PROFILE_DIR, 'node_modules')
 const PKG_PATH = path.join(PROFILE_DIR, 'package.json')
-const STATE_PATH = path.join(dshHome, '.skillskill.json')
+const STATE_PATH = path.join(dshHome, '.veryskill.json')
 const SKILLS_DIR = path.join(dshHome, 'skills')
 const SELF = 'dsh-veryskill'
 const GITHUB_RAW = 'https://ghfast.top/https://raw.githubusercontent.com/ideasir/dsh-veryskill/main/package.json'
-const SETTINGS_FILE = '.skillskill.json'   // 存在技能目录里（设置存技能目录内）
+const SETTINGS_FILE = '.veryskill.json'   // 存在技能目录里（设置存技能目录内）
 
 interface Skill {
   name: string          // 技能名（目录名 或 md 文件名）
@@ -40,7 +40,7 @@ interface Skill {
 }
 
 interface SkillPluginRef {
-  id: string            // 动态插件 pluginId（如 agvid-1）
+  id: string            // 动态插件 pluginId（如 verylook-1）
   name: string          // 插件显示名（如 Agnes video renderer）
   packageId?: string    // 最近关联的 Package（可选）
   attachedAt: string    // 归属时间
@@ -145,8 +145,9 @@ async function scanSkills(): Promise<{ skills: Skill[]; total: number; unmanaged
 
 /** 读技能目录里的设置文件（设置存在技能目录内） */
 function readSkillSettings(skillPath: string): SkillSettings | null {
+  const newPath = path.join(skillPath, SETTINGS_FILE)
   try {
-    const p = path.join(skillPath, SETTINGS_FILE)
+    const p = newPath
     if (!existsSync(p)) return null
     const raw = JSON.parse(readFileSync(p, 'utf-8'))
     return {
@@ -174,7 +175,7 @@ function writeSkillSettings(skillPath: string, settings: SkillSettings): { ok: b
   } catch (e: any) { return { ok: false, error: e?.message } }
 }
 
-/** 把动态插件归属到某个技能：读写该技能本地 .skillskill.json 的 plugins 数组 */
+/** 把动态插件归属到某个技能：读写该技能本地 .veryskill.json 的 plugins 数组 */
 function attachPluginToSkill(skillPath: string, plugin: { id: string; name?: string; packageId?: string }): { ok: boolean; error?: string } {
   try {
     const existing = readSkillSettings(skillPath) ?? { enabled: false, plugins: [], fields: [] }
@@ -512,7 +513,7 @@ export function apply(ctx: any, config: any = {}) {
             const settings = readSkillSettings(found.path)
             const svc = ctx.get?.('settings') ?? ctx.settings
             for (const p of settings?.plugins ?? []) {
-              // namespace 推导：packageId 形如 dsh-agimg → agimg；否则退回插件 id
+              // namespace 推导：packageId 形如 dsh-verylook → verylook；否则退回插件 id
               const raw = (p.packageId && !p.packageId.includes('/')) ? p.packageId : p.id
               const ns = raw.replace(/^dsh-/, '')
               try {
@@ -557,7 +558,7 @@ export function apply(ctx: any, config: any = {}) {
       },
     })
 
-    // 保存技能设置（存技能目录 .skillskill.json）
+    // 保存技能设置（存技能目录 .veryskill.json）
     ctx.webServer.register({
       kind: 'exact', path: '/plugins/dsh-veryskill/setup-save',
       handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -762,8 +763,8 @@ export function apply(ctx: any, config: any = {}) {
           const id = url.searchParams.get('id') ?? ''
           const packageId = url.searchParams.get('packageId') ?? ''
           if (!id) return json(res, { ok: false, error: '缺少插件标识' })
-          // 按包名在 node_modules 里找 package.json：永久插件如 dsh-agimg 是 node_modules 目录；
-          // 动态插件 id（如 agimg-1）不在 node_modules，则 packageId 兜底或返回空描述
+          // 按包名在 node_modules 里找 package.json：永久插件如 dsh-verylook 是 node_modules 目录；
+          // 动态插件 id（如 verylook-1）不在 node_modules，则 packageId 兜底或返回空描述
           let pkg: any = null
           for (const c of [...new Set([packageId, id]).values()]) {
             if (!c) continue

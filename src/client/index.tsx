@@ -820,7 +820,7 @@ function CreateSkillModal({ onClose, onCreated }: { onClose: () => void; onCreat
           </div>
 
           <div style={{ padding: '9px 12px', borderRadius: 10, marginBottom: 14, background: 'color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 9%, transparent)', border: '1px solid color-mix(in srgb, var(--dsw-alias-brand-primary, #7c6cf0) 30%, transparent)', fontSize: 12, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }}>
-            💡 技能需要配套插件时，请把它做成<strong>永久插件</strong>（安装进 profile，如 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-agimg</code>），重启后依然生效；不要用动态插件（进程重启即失效）。
+            💡 技能需要配套插件时，请把它做成<strong>永久插件</strong>（安装进 profile，如 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-verylook</code>），重启后依然生效；不要用动态插件（进程重启即失效）。
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -964,7 +964,7 @@ function PluginModal({ name, onClose, onChanged }: { name: string; onClose: () =
       }}>
         <span style={{ flex: 'none', fontSize: 16, lineHeight: '20px' }}>🔌</span>
         <span style={{ fontSize: 12.5, color: 'var(--dsw-alias-label-primary)', lineHeight: 1.6 }}>
-          <strong>什么是「关联插件」</strong>：每个技能在运行时可能需要一个配套插件来执行实际工作（例如 agnes-image 技能由 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-agimg</code> 插件渲染图片，agnes-video 技能由 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-ovkovk</code> 插件驱动视频生成）。关联就是把配套插件记录到本技能，方便追踪技能由哪些插件驱动。
+          <strong>什么是「关联插件」</strong>：每个技能在运行时可能需要一个配套插件来执行实际工作（例如某个技能由 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>dsh-verylook</code> 插件驱动看图/渲染）。关联就是把配套插件记录到本技能，方便追踪技能由哪些插件驱动。
           <br /><br />
           <strong>配套插件请做成「永久插件」</strong>：把代码放到 <code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>/vol1/1000/DeepSeek/dsh-xxx</code> 并安装进 profile
           （<code style={{ color: 'var(--dsw-alias-brand-primary, #b6aaff)' }}>package.json dependencies + dsh.profile.bundles</code>），重启后依然生效。
@@ -999,7 +999,7 @@ function PluginModal({ name, onClose, onChanged }: { name: string; onClose: () =
       <div style={{ marginBottom: 12 }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--dsw-alias-label-secondary)', letterSpacing: '.05em', textTransform: 'uppercase', margin: '0 0 8px' }}>手动关联</div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <input value={pluginId} onChange={(e) => setPluginId(e.target.value)} placeholder="插件标识，如 dsh-agimg / agimg-1" style={inputStyle} />
+          <input value={pluginId} onChange={(e) => setPluginId(e.target.value)} placeholder="插件标识，如 dsh-verylook / verylook-1" style={inputStyle} />
           <input value={pluginName} onChange={(e) => setPluginName(e.target.value)} placeholder="显示名（可选）" style={{ ...inputStyle, flex: '0 0 30%' }} />
         </div>
       </div>
@@ -1817,7 +1817,7 @@ export function apply(ctx: any) {
   const slots = ctx.slots as any
   const register = slots.register.bind(slots) as (opts: object, comp: unknown) => () => void
 
-  // ── 注入统一卡片 CSS（与 makemake/passpass/veryIM 共用 dsh-mm-* 类） ──
+  // ── 注入统一卡片 CSS（与 makemake/verypass/veryIM 共用 dsh-mm-* 类） ──
   if (!document.getElementById('dsh-mm-css-veryskill')) {
     const s = document.createElement('style'); s.id = 'dsh-mm-css-veryskill'
     s.textContent = `

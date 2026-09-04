@@ -29,7 +29,7 @@
    - **关联插件**：技能需要配套插件时，在「插件」弹窗中关联。
 3. **配套插件务必做成「永久插件」**：把插件代码放到 `/vol1/1000/DeepSeek/dsh-xxx`，并安装进 profile（`package.json` 的 `dependencies` + `dsh.profile.bundles`），这样进程重启后依然加载。
    - **不要用动态插件**（cordis 临时注册）作为技能配套插件——动态插件在进程重启后会丢失，技能随之失效。
-   - 关联插件只记录**该技能真正调用**的配套插件（如 agnes-image → dsh-agimg），手动输入插件标识（如 `dsh-agimg` / `agimg-1`）即可关联。
+   - 关联插件只记录**该技能真正调用**的配套插件（如某个技能 → dsh-verylook），手动输入插件标识（如 `dsh-verylook` / `verylook-1`）即可关联。
 
 ## 部署
 

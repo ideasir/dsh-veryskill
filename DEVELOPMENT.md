@@ -19,7 +19,7 @@ lib/                  # 构建产物（lib/index.js + lib/client.js）
 
 ```bash
 # 构建客户端
-node /vol1/1000/DeepSeek/dsh-passpass/node_modules/tsdown/dist/run.mjs
+node /vol1/1000/DeepSeek/dsh-verypass/node_modules/tsdown/dist/run.mjs
 # 部署到 profile
 cp lib/client.js /root/.dsh/profiles/web/node_modules/dsh-veryskill/lib/client.js
 cp lib/client.js.map /root/.dsh/profiles/web/node_modules/dsh-veryskill/lib/client.js.map
