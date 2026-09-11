@@ -333,6 +333,40 @@ function applyInvocationFlags(md: string, disable: boolean): boolean {
   return true
 }
 
+/** 技能设置同步进 SKILL.md 顶部的「运行时配置」块（模型加载技能时能看到权威值）。
+ * 包在 HTML 注释标记里幂等替换；isSecret 字段不写入（避免密钥进模型上下文）。
+ * 设置关闭或无可写字段时移除该块，恢复纯默认。 */
+function syncSettingsToSkillMd(skillPath: string, settings: SkillSettings): void {
+  try {
+    const md = skillMarkdownPath(skillPath)
+    if (!md) return
+    const text = readFileSync(md, 'utf-8')
+    const startTag = '<!-- veryskill-config-start -->'
+    const endTag = '<!-- veryskill-config-end -->'
+    const st = text.indexOf(startTag)
+    const en = text.indexOf(endTag)
+
+    const entries = (settings.fields || []).filter(f => !f.isSecret && f.value)
+    let block = ''
+    if (settings.enabled && entries.length > 0) {
+      const lines = entries.map(f => `- \`${f.key}\`：\`${f.value}\``).join('\n')
+      block = `${startTag}\n## 运行时配置（来自「超级技能」设置面板，权威值）\n\n调用本技能时，以下参数值**优先于**本文档其余部分的默认值/示例值，必须直接使用：\n\n${lines}\n\n${endTag}`
+    }
+    if (st >= 0 && en > st) {
+      // 已有旧块：整段替换（含包裹标记）
+      const rebuilt = text.slice(0, st) + block + text.slice(en + endTag.length)
+      if (rebuilt !== text) writeFileSync(md, rebuilt, 'utf-8')
+    } else if (block) {
+      // 无块且有内容：插到 frontmatter 之后
+      const close = text.indexOf('\n---', 1)
+      if (close >= 0) {
+        const rebuilt = text.slice(0, close + 4) + '\n\n' + block + '\n' + text.slice(close + 4).replace(/^\n+/, '\n')
+        writeFileSync(md, rebuilt, 'utf-8')
+      }
+    }
+  } catch { /* ignore */ }
+}
+
 /** 解析技能路径指向的 md 文件（目录技能取 SKILL.md，扁平技能取自身） */
 function skillMarkdownPath(skillPath: string): string | null {
   try {
@@ -579,7 +613,10 @@ export function apply(ctx: any, config: any = {}) {
               value: String(f.value ?? ''), isSecret: !!f.isSecret, reason: String(f.reason ?? ''),
             })).filter(f => f.key) : [],
           }
-          json(res, writeSkillSettings(found.path, settings))
+          // 保存到 .veryskill.json + 同步权威配置块进 SKILL.md（模型加载即见）
+          const r = writeSkillSettings(found.path, settings)
+          if (r.ok) syncSettingsToSkillMd(found.path, settings)
+          json(res, r)
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
       },
     })
@@ -735,6 +772,14 @@ export function apply(ctx: any, config: any = {}) {
             description: body.description !== undefined && body.description !== null ? String(body.description) : undefined,
             body: String(body.body ?? ''),
           })
+          // 保存正文后重新同步配置块（编辑会重写整个文件）
+          if (r.ok) {
+            const found = findSkillPath(name)
+            if (found) {
+              const settings = readSkillSettings(found.path)
+              if (settings) syncSettingsToSkillMd(found.path, settings)
+            }
+          }
           json(res, r)
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
       },
