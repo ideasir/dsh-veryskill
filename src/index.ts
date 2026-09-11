@@ -175,6 +175,33 @@ function writeSkillSettings(skillPath: string, settings: SkillSettings): { ok: b
   } catch (e: any) { return { ok: false, error: e?.message } }
 }
 
+/** 把设置变更同步进 SKILL.md 正文：对比磁盘旧设置与新建的 settings，
+ * 某字段值变了（旧 X → 新 Y），把 SKILL.md 全文里的 X 替换成 Y。
+ * 这样模型加载技能时看到的 SKILL.md 就是设置后的值（设置即改即生效）。
+ * isSecret 字段不替换（密钥不进技能内容）。 */
+function applySettingsToSkillMd(skillPath: string, oldSettings: SkillSettings | null, settings: SkillSettings): void {
+  try {
+    const md = skillMarkdownPath(skillPath)
+    if (!md) return
+    let text = readFileSync(md, 'utf-8')
+    let changed = text
+    for (const f of settings.fields || []) {
+      if (f.isSecret || !f.value) continue
+      const newVal = String(f.value).trim()
+      if (!newVal) continue
+      let oldVal = ''
+      if (oldSettings) {
+        const oldField = (oldSettings.fields || []).find(o => o.key === f.key)
+        oldVal = oldField ? String(oldField.value).trim() : ''
+      }
+      if (oldVal && oldVal !== newVal && changed.includes(oldVal)) {
+        changed = changed.split(oldVal).join(newVal)
+      }
+    }
+    if (changed !== text) writeFileSync(md, changed, 'utf-8')
+  } catch { /* ignore */ }
+}
+
 /** 把动态插件归属到某个技能：读写该技能本地 .veryskill.json 的 plugins 数组 */
 function attachPluginToSkill(skillPath: string, plugin: { id: string; name?: string; packageId?: string }): { ok: boolean; error?: string } {
   try {
@@ -331,40 +358,6 @@ function applyInvocationFlags(md: string, disable: boolean): boolean {
   if (rebuilt === text) return true
   writeFileSync(md, rebuilt, 'utf-8')
   return true
-}
-
-/** 技能设置同步进 SKILL.md 顶部的「运行时配置」块（模型加载技能时能看到权威值）。
- * 包在 HTML 注释标记里幂等替换；isSecret 字段不写入（避免密钥进模型上下文）。
- * 设置关闭或无可写字段时移除该块，恢复纯默认。 */
-function syncSettingsToSkillMd(skillPath: string, settings: SkillSettings): void {
-  try {
-    const md = skillMarkdownPath(skillPath)
-    if (!md) return
-    const text = readFileSync(md, 'utf-8')
-    const startTag = '<!-- veryskill-config-start -->'
-    const endTag = '<!-- veryskill-config-end -->'
-    const st = text.indexOf(startTag)
-    const en = text.indexOf(endTag)
-
-    const entries = (settings.fields || []).filter(f => !f.isSecret && f.value)
-    let block = ''
-    if (settings.enabled && entries.length > 0) {
-      const lines = entries.map(f => `- \`${f.key}\`：\`${f.value}\``).join('\n')
-      block = `${startTag}\n## 运行时配置（来自「超级技能」设置面板，权威值）\n\n调用本技能时，以下参数值**优先于**本文档其余部分的默认值/示例值，必须直接使用：\n\n${lines}\n\n${endTag}`
-    }
-    if (st >= 0 && en > st) {
-      // 已有旧块：整段替换（含包裹标记）
-      const rebuilt = text.slice(0, st) + block + text.slice(en + endTag.length)
-      if (rebuilt !== text) writeFileSync(md, rebuilt, 'utf-8')
-    } else if (block) {
-      // 无块且有内容：插到 frontmatter 之后
-      const close = text.indexOf('\n---', 1)
-      if (close >= 0) {
-        const rebuilt = text.slice(0, close + 4) + '\n\n' + block + '\n' + text.slice(close + 4).replace(/^\n+/, '\n')
-        writeFileSync(md, rebuilt, 'utf-8')
-      }
-    }
-  } catch { /* ignore */ }
 }
 
 /** 解析技能路径指向的 md 文件（目录技能取 SKILL.md，扁平技能取自身） */
@@ -613,9 +606,10 @@ export function apply(ctx: any, config: any = {}) {
               value: String(f.value ?? ''), isSecret: !!f.isSecret, reason: String(f.reason ?? ''),
             })).filter(f => f.key) : [],
           }
-          // 保存到 .veryskill.json + 同步权威配置块进 SKILL.md（模型加载即见）
+          // 保存前取磁盘旧设置，保存后把字段变更同步进 SKILL.md（设置即改即生效）
+          const oldSettings = readSkillSettings(found.path)
           const r = writeSkillSettings(found.path, settings)
-          if (r.ok) syncSettingsToSkillMd(found.path, settings)
+          if (r.ok) applySettingsToSkillMd(found.path, oldSettings, settings)
           json(res, r)
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
       },
@@ -768,19 +762,10 @@ export function apply(ctx: any, config: any = {}) {
           const body = await readBody(req)
           const name = String(body.name ?? '')
           if (!name || name === SELF) return json(res, { ok: false, error: '无效的技能名' })
-          const r = saveSkillContent(name, {
+          json(res, saveSkillContent(name, {
             description: body.description !== undefined && body.description !== null ? String(body.description) : undefined,
             body: String(body.body ?? ''),
-          })
-          // 保存正文后重新同步配置块（编辑会重写整个文件）
-          if (r.ok) {
-            const found = findSkillPath(name)
-            if (found) {
-              const settings = readSkillSettings(found.path)
-              if (settings) syncSettingsToSkillMd(found.path, settings)
-            }
-          }
-          json(res, r)
+          }))
         } catch (e: any) { json(res, { ok: false, error: e?.message }, 500) }
       },
     })

@@ -1750,10 +1750,10 @@ function SkillQuickLauncher(_props: any) {
     </div>
   )
 
-  // 二级菜单内容（hover 分类时出现）
+  // 二级菜单内容（hover 分类时出现，向上弹出避免遮挡输入框下方）
   const subEl = (activeCat && activeGroup && subPos) ? (
     <div style={{
-      position: 'fixed', left: subPos.x, top: subPos.y, zIndex: 2147483002, width: 150,
+      position: 'fixed', left: subPos.x, bottom: window.innerHeight - subPos.y + 6, zIndex: 2147483002, width: 150,
       background: 'var(--dsw-alias-bg-layer-2)', border: '1px solid var(--dsw-alias-border-l2)',
       borderRadius: 10, boxShadow: '0 12px 40px rgba(0,0,0,0.35)', padding: 4,
     }}>
